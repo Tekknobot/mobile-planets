@@ -40,7 +40,6 @@ const STAR_SHADER := preload("res://Shaders/star_generator.gdshader")
 @onready var time_button: Button = $UI/ToolsPanel/Margin/VBox/Grid/TimeAdvance
 @onready var flare_button: Button = $UI/ToolsPanel/Margin/VBox/Grid/Flare
 @onready var tools_close_button: Button = $UI/ToolsPanel/Margin/VBox/CloseTools
-@onready var radial_menu: Node2D = $UI/RadialMenu
 @onready var war_overlay: Node2D = $MeteorLayer/WarOverlay
 
 var planet_rotation := Vector2(0.45, -0.08)
@@ -66,14 +65,6 @@ var war_strike_active := false
 var war_launch_index := -1
 var ai_response_pending := false
 var ai_response_faction := -1
-
-var hold_pending := false
-var hold_elapsed := 0.0
-var hold_origin := Vector2.ZERO
-var hold_pointer_id := -999
-var radial_active := false
-const RADIAL_HOLD_TIME := 0.38
-const RADIAL_MOVE_THRESHOLD := 13.0
 
 var zoom_factor := 1.0
 var event_scale := 1.0
@@ -126,9 +117,7 @@ func _ready() -> void:
 	catalog_list.item_selected.connect(_on_catalog_item_selected)
 	if war_overlay.has_signal("strike_completed"):
 		war_overlay.connect("strike_completed", Callable(self, "_on_war_strike_completed"))
-	if radial_menu.has_method("set_menu_font"):
-		radial_menu.call("set_menu_font", $UI.theme.default_font)
-	hint_label.text = "DRAG TO ROTATE  HOLD FOR WAR"
+	hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 	catalog_panel.visible = false
 	tools_panel.visible = false
 	meteor.visible = false
@@ -156,8 +145,6 @@ func _apply_mago_font() -> void:
 	var ui_theme := $UI.theme.duplicate() as Theme
 	ui_theme.default_font = loaded_font
 	$UI.theme = ui_theme
-	if radial_menu != null and radial_menu.has_method("set_menu_font"):
-		radial_menu.call("set_menu_font", loaded_font)
 
 func _find_pixel_font(directory_path: String) -> String:
 	var directory := DirAccess.open(directory_path)
@@ -194,14 +181,9 @@ func _find_pixel_font(directory_path: String) -> String:
 func _process(delta: float) -> void:
 	orbit_time += delta
 
-	if hold_pending and not radial_active:
-		hold_elapsed += delta
-		if hold_elapsed >= RADIAL_HOLD_TIME:
-			_open_radial_menu(hold_origin)
-
 	if blackhole_active:
 		planet_rotation.x += auto_rotation_speed * 4.0 * delta
-	elif not dragging and not meteor_target_mode and not storm_target_mode and not war_target_mode and not radial_active and not hold_pending:
+	elif not dragging and not meteor_target_mode and not storm_target_mode and not war_target_mode:
 		if rotation_velocity.length() > 0.001:
 			planet_rotation += rotation_velocity * delta
 			rotation_velocity = rotation_velocity.move_toward(Vector2.ZERO, 1.65 * delta)
@@ -219,11 +201,14 @@ func _input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		if radial_active or hold_pending:
-			_cancel_radial_hold()
-			return
 		if war_target_mode:
 			_cancel_war_target(true)
+			return
+		if meteor_target_mode:
+			_cancel_meteor_target(true)
+			return
+		if storm_target_mode:
+			_cancel_storm_target(true)
 			return
 
 	if event is InputEventMouseButton and event.pressed:
@@ -265,155 +250,87 @@ func _input(event: InputEvent) -> void:
 			return
 		return
 
-	# Touch: a stationary hold opens the radial menu; moving first converts the
-	# gesture into the existing planet rotation interaction.
 	if event is InputEventScreenTouch:
 		if event.pressed:
 			if _pointer_over_controls(event.position):
 				return
-			if _is_point_on_planet(event.position):
-				_begin_radial_hold(event.position, event.index)
-		elif event.index == hold_pointer_id:
-			if radial_active:
-				_finish_radial_action(event.position)
-			elif hold_pending:
-				_cancel_radial_hold()
-			elif dragging:
-				dragging = false
-				active_touch = -1
-				hint_label.text = "DRAG TO ROTATE  HOLD FOR WAR"
-		return
-
-	if event is InputEventScreenDrag and event.index == hold_pointer_id:
-		if radial_active:
-			radial_menu.call("update_pointer", event.position)
-			return
-		if hold_pending:
-			if event.position.distance_to(hold_origin) > RADIAL_MOVE_THRESHOLD:
-				hold_pending = false
-				dragging = true
+			if _try_begin_war_from_city(event.position):
+				return
+			if _is_point_on_planet(event.position) and active_touch == -1:
 				active_touch = event.index
+				dragging = true
 				rotation_velocity = Vector2.ZERO
 				hint_label.text = "ROTATING"
-				_apply_drag(event.relative)
-			return
-		if dragging:
-			_apply_drag(event.relative)
+		elif event.index == active_touch:
+			active_touch = -1
+			dragging = false
+			hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 		return
 
-	# Mouse version of the same hold-versus-drag gesture.
+	if event is InputEventScreenDrag and event.index == active_touch:
+		_apply_drag(event.relative)
+		return
+
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
 			if _pointer_over_controls(event.position):
 				return
+			if _try_begin_war_from_city(event.position):
+				return
 			if _is_point_on_planet(event.position):
-				_begin_radial_hold(event.position, -1)
-		else:
-			if radial_active:
-				_finish_radial_action(event.position)
-			elif hold_pending:
-				_cancel_radial_hold()
-			elif dragging:
-				dragging = false
-				hint_label.text = "DRAG TO ROTATE  HOLD FOR WAR"
-		return
-
-	if event is InputEventMouseMotion:
-		if radial_active:
-			radial_menu.call("update_pointer", event.position)
-			return
-		if hold_pending and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-			if event.position.distance_to(hold_origin) > RADIAL_MOVE_THRESHOLD:
-				hold_pending = false
 				dragging = true
-				last_mouse_pos = event.position
 				rotation_velocity = Vector2.ZERO
+				last_mouse_pos = event.position
 				hint_label.text = "ROTATING"
-				_apply_drag(event.relative)
-			return
-		if dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-			_apply_drag(event.relative)
-
-func _begin_radial_hold(position: Vector2, pointer_id: int) -> void:
-	if current_entry.is_empty() or meteor_active or blackhole_active or war_strike_active:
+		else:
+			if dragging:
+				dragging = false
+				hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 		return
-	hold_pending = true
-	hold_elapsed = 0.0
-	hold_origin = position
-	hold_pointer_id = pointer_id
+
+	if event is InputEventMouseMotion and dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		var drag_delta = event.position - last_mouse_pos
+		last_mouse_pos = event.position
+		_apply_drag(drag_delta)
+
+func _try_begin_war_from_city(screen_position: Vector2) -> bool:
+	if not _is_current_world() or blackhole_active or meteor_active or war_strike_active:
+		return false
+	_ensure_war_state(current_entry)
+	if not war_overlay.has_method("pick_city"):
+		return false
+	var city_index := int(war_overlay.call("pick_city", screen_position))
+	if city_index < 0:
+		return false
+	var cities: Array = current_entry.get("cities", [])
+	if city_index >= cities.size():
+		return false
+	var source: Dictionary = cities[city_index]
+	if float(source.get("damage", 0.0)) >= 0.98:
+		return true
+	if int(source.get("faction", -1)) != 0:
+		hint_label.text = "CLICK ONE OF YOUR CYAN NODES"
+		return true
+
+	var enemy_alive := 0
+	for city_value in cities:
+		var city: Dictionary = city_value
+		if int(city.get("faction", -1)) > 0 and float(city.get("damage", 0.0)) < 0.98:
+			enemy_alive += 1
+	if enemy_alive <= 0:
+		hint_label.text = "PLANET PACIFIED"
+		return true
+
+	war_target_mode = true
+	war_launch_index = city_index
 	dragging = false
-	active_touch = pointer_id
-	rotation_velocity = Vector2.ZERO
-	hint_label.text = "HOLD FOR WAR"
-
-func _cancel_radial_hold() -> void:
-	hold_pending = false
-	hold_elapsed = 0.0
-	radial_active = false
-	hold_pointer_id = -999
 	active_touch = -1
-	if radial_menu.has_method("hide_menu"):
-		radial_menu.call("hide_menu")
-	if not war_target_mode and not meteor_target_mode and not storm_target_mode:
-		hint_label.text = "DRAG TO ROTATE  HOLD FOR WAR"
-
-func _open_radial_menu(position: Vector2) -> void:
-	if not hold_pending or current_entry.is_empty():
-		return
-	hold_pending = false
-	radial_active = true
-	dragging = false
 	rotation_velocity = Vector2.ZERO
-	var viewport_size := get_viewport_rect().size
-	var center := Vector2(clamp(position.x, 150.0, viewport_size.x - 150.0), clamp(position.y, 150.0, viewport_size.y - 150.0))
-	if radial_menu.has_method("open_menu"):
-		radial_menu.call("open_menu", center, _radial_actions())
-	hint_label.text = "DRAG TO ACTION  RELEASE TO SELECT"
-
-func _finish_radial_action(position: Vector2) -> void:
-	if not radial_active:
-		return
-	var action := ""
-	if radial_menu.has_method("finish"):
-		action = str(radial_menu.call("finish", position))
-	radial_active = false
-	hold_pointer_id = -999
-	active_touch = -1
-	if action.is_empty():
-		hint_label.text = "DRAG TO ROTATE  HOLD FOR WAR"
-		return
-	_execute_radial_action(action)
-
-func _radial_actions() -> Array[Dictionary]:
-	if current_entry.get("kind", "world") == "star":
-		return [
-			{"id":"flare", "label":"FLARE", "enabled":true},
-			{"id":"blackhole", "label":"BLACK HOLE", "enabled":true}
-		]
-	return [
-		{"id":"war", "label":"WAR", "enabled":true},
-		{"id":"meteor", "label":"METEOR", "enabled":true},
-		{"id":"storm", "label":"STORM", "enabled":true},
-		{"id":"blackhole", "label":"BLACK HOLE", "enabled":true}
-	]
-
-func _execute_radial_action(action: String) -> void:
-	match action:
-		"freeze": _freeze_current()
-		"heat": _heat_current()
-		"water": _adjust_water(0.12)
-		"atmos": _adjust_atmosphere(0.12)
-		"life":
-			if float(current_entry.get("life_level", 0.0)) < 0.05:
-				_seed_life()
-			else:
-				_evolve_world()
-		"time": _advance_time()
-		"storm": _trigger_storm()
-		"meteor": _trigger_meteor()
-		"war": _trigger_war()
-		"flare": _trigger_flare()
-		"blackhole": _trigger_blackhole()
+	_set_event_controls_disabled(true, true)
+	if war_overlay.has_method("set_war_mode"):
+		war_overlay.call("set_war_mode", true, war_launch_index)
+	hint_label.text = "SELECT ENEMY TARGET  TENSION %d" % int(current_entry.get("tension", 0))
+	return true
 
 func _is_point_on_planet(screen_position: Vector2) -> bool:
 	if current_entry.is_empty():
@@ -727,7 +644,6 @@ func _apply_drag(relative: Vector2) -> void:
 	_update_rotation_uniforms()
 
 func _generate_new() -> void:
-	_cancel_radial_hold()
 	_cancel_war_target(false)
 	_cancel_meteor_target(false)
 	tools_panel.visible = false
@@ -739,7 +655,6 @@ func _generate_new() -> void:
 	_apply_entry(entry)
 
 func _show_previous() -> void:
-	_cancel_radial_hold()
 	_cancel_war_target(false)
 	_cancel_meteor_target(false)
 	tools_panel.visible = false
@@ -748,7 +663,6 @@ func _show_previous() -> void:
 		_apply_entry(discoveries[current_index])
 
 func _show_next() -> void:
-	_cancel_radial_hold()
 	_cancel_war_target(false)
 	_cancel_meteor_target(false)
 	tools_panel.visible = false
@@ -1139,7 +1053,7 @@ func _toggle_catalog() -> void:
 		_update_catalog_list()
 		hint_label.text = "CATALOG OPEN"
 	else:
-		hint_label.text = "DRAG TO ROTATE"
+		hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 
 func _toggle_tools_panel() -> void:
 	if meteor_target_mode or storm_target_mode or meteor_active or blackhole_active or current_entry.is_empty():
@@ -1150,7 +1064,7 @@ func _toggle_tools_panel() -> void:
 		_update_tools_buttons()
 		hint_label.text = "INTERVENTION TOOLS"
 	else:
-		hint_label.text = "DRAG TO ROTATE"
+		hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 
 func _adjust_water(amount: float) -> void:
 	if not _is_current_world():
@@ -1259,6 +1173,15 @@ func _trigger_storm() -> void:
 	rotation_velocity = Vector2.ZERO
 	_set_event_controls_disabled(true, true)
 	hint_label.text = "TAP PLANET FOR STORM"
+
+func _cancel_storm_target(show_hint: bool) -> void:
+	if not storm_target_mode:
+		return
+	storm_target_mode = false
+	_set_event_controls_disabled(false, false)
+	_update_buttons()
+	if show_hint:
+		hint_label.text = "STORM TARGETING CANCELED"
 
 func _attempt_storm_target(screen_position: Vector2) -> void:
 	var local_position: Vector2 = planet.get_global_transform().affine_inverse() * screen_position
@@ -1569,7 +1492,6 @@ func _apply_entry(entry: Dictionary) -> void:
 	war_launch_index = -1
 	ai_response_pending = false
 	ai_response_faction = -1
-	_cancel_radial_hold()
 	current_entry = entry.duplicate(true)
 	_ensure_entry_state(current_entry)
 	_commit_current_entry()
@@ -1688,32 +1610,6 @@ func _base_temperature(entry: Dictionary) -> int:
 func _build_random_entry() -> Dictionary:
 	var seed_value := rng.randi_range(1000, 999999)
 	var light_dir := Vector3(rng.randf_range(-0.75, -0.25), rng.randf_range(-0.35, 0.25), rng.randf_range(0.55, 0.92)).normalized()
-	var roll := rng.randi_range(0, 99)
-	var is_star := roll < 18
-	if is_star:
-		var class_index := rng.randi_range(0, STAR_CLASSES.size() - 1)
-		var palette := _star_palette(class_index)
-		var star_temp = [3200, 4500, 5800, 7200, 9400][class_index]
-		return {
-			"kind": "star",
-			"seed": float(seed_value),
-			"title": _make_name(true),
-			"subtitle": STAR_CLASSES[class_index],
-			"core_color": palette[0],
-			"mid_color": palette[1],
-			"edge_color": palette[2],
-			"glow_color": palette[3],
-			"radius": rng.randf_range(0.72, 0.82),
-			"pixel_resolution": 128.0,
-			"rotation_speed": rng.randf_range(0.05, 0.10),
-			"base_temperature": star_temp,
-			"temperature_text": "%d K" % star_temp,
-			"water": -1,
-			"habitability": 0,
-			"flare_angle": rng.randf_range(-PI, PI),
-			"light_dir": light_dir
-		}
-
 	var world_index := _weighted_world_type()
 	var moon_count := rng.randi_range(1, 2) if world_index == 3 else rng.randi_range(0, 2)
 	var atmosphere := "UNKNOWN"
