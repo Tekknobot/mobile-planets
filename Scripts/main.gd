@@ -65,6 +65,8 @@ var war_strike_active := false
 var war_launch_index := -1
 var ai_response_pending := false
 var ai_response_faction := -1
+var combat_camera_tween: Tween = null
+var impact_camera_tween: Tween = null
 
 var zoom_factor := 1.0
 var event_scale := 1.0
@@ -183,14 +185,17 @@ func _process(delta: float) -> void:
 
 	if blackhole_active:
 		planet_rotation.x += auto_rotation_speed * 4.0 * delta
-	elif not dragging and not meteor_target_mode and not storm_target_mode and not war_target_mode:
+	elif not war_strike_active and not dragging and not meteor_target_mode and not storm_target_mode and not war_target_mode:
 		if rotation_velocity.length() > 0.001:
 			planet_rotation += rotation_velocity * delta
 			rotation_velocity = rotation_velocity.move_toward(Vector2.ZERO, 1.65 * delta)
 		else:
 			planet_rotation.x += auto_rotation_speed * delta
 
-	planet_rotation.y = clamp(planet_rotation.y, -1.35, 1.35)
+	# Manual rotation keeps the familiar restrained pitch, while combat camera
+	# moves may approach the poles so hidden launch and impact sites can be shown.
+	var pitch_limit := 1.565 if war_strike_active else 1.35
+	planet_rotation.y = clamp(planet_rotation.y, -pitch_limit, pitch_limit)
 	_apply_celestial_transform()
 	_update_rotation_uniforms()
 	_update_moons()
@@ -424,8 +429,7 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 
 	var tension := int(current_entry.get("tension", 0))
 	var nuclear := tension >= 80
-	if war_overlay.has_method("launch_missile"):
-		war_overlay.call("launch_missile", war_launch_index, city_index, nuclear, false)
+	var launch_index := war_launch_index
 	current_entry["tension"] = clamp(tension + (12 if nuclear else 8), 0, 100)
 	current_entry["war_history"] = int(current_entry.get("war_history", 0)) + 1
 	_commit_current_entry()
@@ -437,6 +441,7 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 		war_overlay.call("set_war_mode", false, -1)
 	_set_event_controls_disabled(true, true)
 	hint_label.text = "NUCLEAR LAUNCH DETECTED" if nuclear else "MISSILE LAUNCH DETECTED"
+	_launch_war_missile_cinematic(launch_index, city_index, nuclear, false)
 
 func _faction_name(index: int) -> String:
 	var factions: Array = current_entry.get("factions", [])
@@ -556,13 +561,104 @@ func _launch_enemy_retaliation(defender_faction: int) -> void:
 
 	var tension := int(current_entry.get("tension", 0))
 	var nuclear := tension >= 88 or (tension >= 72 and rng.randf() < 0.48)
-	if war_overlay.has_method("launch_missile"):
-		war_overlay.call("launch_missile", source_index, target_index, nuclear, true)
 	current_entry["tension"] = clamp(tension + (12 if nuclear else 7), 0, 100)
 	current_entry["war_history"] = int(current_entry.get("war_history", 0)) + 1
 	_commit_current_entry()
 	info_label.text = _format_info_line(current_entry)
 	hint_label.text = "ENEMY NUCLEAR RETALIATION" if nuclear else "ENEMY RETALIATION"
+	_launch_war_missile_cinematic(source_index, target_index, nuclear, true)
+
+func _launch_war_missile_cinematic(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool) -> void:
+	var cities: Array = current_entry.get("cities", [])
+	if source_index < 0 or target_index < 0 or source_index >= cities.size() or target_index >= cities.size():
+		war_strike_active = false
+		return
+
+	rotation_velocity = Vector2.ZERO
+	var source_city: Dictionary = cities[source_index]
+	var source_surface: Vector3 = source_city.get("surface", Vector3(0.0, 0.0, 1.0))
+
+	# Enemy launches should never happen invisibly on the far side. Bring the
+	# hostile launch node into view before its missile actually leaves the surface.
+	if ai_controlled and not _is_surface_clearly_visible(source_surface, 0.38):
+		hint_label.text = "TRACKING ENEMY LAUNCH SITE"
+		_rotate_planet_to_surface_then(source_surface, 0.68, _begin_war_missile.bind(source_index, target_index, nuclear, ai_controlled))
+	else:
+		_begin_war_missile(source_index, target_index, nuclear, ai_controlled)
+
+func _begin_war_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool) -> void:
+	if not _is_current_world() or blackhole_active:
+		war_strike_active = false
+		return
+	if war_overlay.has_method("launch_missile"):
+		war_overlay.call("launch_missile", source_index, target_index, nuclear, ai_controlled)
+
+	var flight_time := 2.45 if nuclear else 1.85
+	if impact_camera_tween != null and impact_camera_tween.is_valid():
+		impact_camera_tween.kill()
+	impact_camera_tween = create_tween()
+	# Let the player watch the first half of the trajectory, then turn the globe
+	# toward a hidden destination so the strike lands visibly on-screen.
+	impact_camera_tween.tween_interval(flight_time * 0.43)
+	impact_camera_tween.tween_callback(_focus_war_impact_if_needed.bind(target_index, flight_time * 0.36))
+
+func _focus_war_impact_if_needed(target_index: int, turn_time: float) -> void:
+	var cities: Array = current_entry.get("cities", [])
+	if target_index < 0 or target_index >= cities.size():
+		return
+	var target_city: Dictionary = cities[target_index]
+	var target_surface: Vector3 = target_city.get("surface", Vector3(0.0, 0.0, 1.0))
+	# The higher threshold means a barely-visible limb impact is also brought
+	# inward, making the explosion/crater presentation easy to read.
+	if not _is_surface_clearly_visible(target_surface, 0.58):
+		hint_label.text = "TRACKING IMPACT"
+		_rotate_planet_to_surface(target_surface, clamp(turn_time, 0.48, 0.82))
+
+func _rotate_planet_to_surface_then(surface: Vector3, duration: float, callback: Callable) -> void:
+	if combat_camera_tween != null and combat_camera_tween.is_valid():
+		combat_camera_tween.kill()
+	var target_rotation := _rotation_to_face_surface(surface)
+	combat_camera_tween = create_tween()
+	combat_camera_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	combat_camera_tween.tween_method(_set_combat_camera_rotation, planet_rotation, target_rotation, duration)
+	combat_camera_tween.tween_callback(callback)
+
+func _rotate_planet_to_surface(surface: Vector3, duration: float) -> void:
+	if combat_camera_tween != null and combat_camera_tween.is_valid():
+		combat_camera_tween.kill()
+	var target_rotation := _rotation_to_face_surface(surface)
+	combat_camera_tween = create_tween()
+	combat_camera_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	combat_camera_tween.tween_method(_set_combat_camera_rotation, planet_rotation, target_rotation, duration)
+
+func _set_combat_camera_rotation(value: Vector2) -> void:
+	planet_rotation = value
+	rotation_velocity = Vector2.ZERO
+
+func _is_surface_clearly_visible(surface: Vector3, minimum_depth: float = 0.35) -> bool:
+	var camera_space := _rotate_x_vec3(surface.normalized(), -planet_rotation.y)
+	camera_space = _rotate_y_vec3(camera_space, -planet_rotation.x)
+	return camera_space.z >= minimum_depth
+
+func _rotation_to_face_surface(surface: Vector3) -> Vector2:
+	var s := surface.normalized()
+	# Two Euler solutions can face the same point. Pick the one that requires the
+	# least pitch, then choose the equivalent yaw nearest the current rotation.
+	var x1 := asin(clamp(s.x, -1.0, 1.0))
+	var y1 := atan2(-s.y, s.z)
+	var x2 := PI - x1
+	var y2 := wrapf(y1 + PI, -PI, PI)
+	var chosen_x := x1
+	var chosen_y := y1
+	if abs(y2) < abs(y1):
+		chosen_x = x2
+		chosen_y = y2
+	chosen_x = _nearest_equivalent_angle(chosen_x, planet_rotation.x)
+	chosen_y = clamp(chosen_y, -1.565, 1.565)
+	return Vector2(chosen_x, chosen_y)
+
+func _nearest_equivalent_angle(angle: float, reference: float) -> float:
+	return reference + wrapf(angle - reference, -PI, PI)
 
 func _update_war_overlay() -> void:
 	if war_overlay == null or not war_overlay.has_method("set_context"):
