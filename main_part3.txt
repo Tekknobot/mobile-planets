@@ -1,0 +1,325 @@
+		file.store_string(var_to_str(favorites))
+
+func _load_favorites() -> void:
+	if not FileAccess.file_exists("user://planet_favorites.save"):
+		return
+	var file := FileAccess.open("user://planet_favorites.save", FileAccess.READ)
+	if file == null:
+		return
+	var loaded = str_to_var(file.get_as_text())
+	if loaded is Array:
+		favorites.clear()
+		for item in loaded:
+			if item is Dictionary:
+				favorites.append(item)
+	_update_catalog_list()
+
+func _toggle_catalog() -> void:
+	if meteor_target_mode or meteor_active or blackhole_active:
+		return
+	catalog_panel.visible = not catalog_panel.visible
+	if catalog_panel.visible:
+		_update_catalog_list()
+		hint_label.text = "CATALOG OPEN"
+	else:
+		hint_label.text = "DRAG TO ROTATE"
+
+func _on_catalog_item_selected(index: int) -> void:
+	if index >= 0 and index < favorites.size():
+		_apply_entry(favorites[index].duplicate(true))
+		catalog_panel.visible = false
+		hint_label.text = "CATALOG ENTRY LOADED"
+
+func _update_catalog_list() -> void:
+	catalog_list.clear()
+	for entry in favorites:
+		catalog_list.add_item("%s  %s" % [entry.get("title", "UNKNOWN"), entry.get("subtitle", "BODY")])
+
+func _update_rotation_uniforms() -> void:
+	var planet_material := planet.material as ShaderMaterial
+	if planet_material:
+		planet_material.set_shader_parameter("rotation_xy", planet_rotation)
+	for moon in [moon_a, moon_b]:
+		var moon_material := moon.material as ShaderMaterial
+		if moon.visible and moon_material:
+			moon_material.set_shader_parameter("rotation_xy", planet_rotation + Vector2(orbit_time * 0.2, 0.0))
+
+func _update_moons() -> void:
+	var center := planet.position + planet.size * 0.5
+	var moon_nodes := [moon_a, moon_b]
+	for i in range(moon_nodes.size()):
+		var moon: ColorRect = moon_nodes[i]
+		if i < moon_specs.size():
+			var spec := moon_specs[i]
+			var angle: float = orbit_time * float(spec["speed"]) + float(spec["phase"])
+			var combined := zoom_factor * event_scale
+			var offset := Vector2(
+				cos(angle) * float(spec["orbit_x"]) * combined * event_stretch.x,
+				sin(angle) * float(spec["orbit_y"]) * combined * event_stretch.y
+			)
+			moon.scale = Vector2.ONE * combined
+			moon.position = center + offset - moon.size * 0.5
+			moon.visible = true
+		else:
+			moon.visible = false
+
+func _apply_entry(entry: Dictionary) -> void:
+	if climate_tween != null and climate_tween.is_valid():
+		climate_tween.kill()
+	current_entry = entry.duplicate(true)
+	moon_specs.clear()
+	climate_visual = float(current_entry.get("climate_shift", 0.0))
+	var material := planet.material as ShaderMaterial
+	if material == null:
+		return
+
+	if entry.get("kind", "world") == "star":
+		planet_shadow.visible = false
+		moon_a.visible = false
+		moon_b.visible = false
+		material.shader = STAR_SHADER
+		material.set_shader_parameter("seed", entry["seed"])
+		material.set_shader_parameter("pixel_resolution", entry["pixel_resolution"])
+		material.set_shader_parameter("planet_radius", entry["radius"])
+		material.set_shader_parameter("core_color", entry["core_color"])
+		material.set_shader_parameter("mid_color", entry["mid_color"])
+		material.set_shader_parameter("edge_color", entry["edge_color"])
+		material.set_shader_parameter("glow_color", entry["glow_color"])
+		material.set_shader_parameter("local_light_dir", entry["light_dir"])
+		material.set_shader_parameter("lighting_strength", 0.55)
+	else:
+		planet_shadow.visible = true
+		material.shader = WORLD_SHADER
+		material.set_shader_parameter("seed", entry["seed"])
+		material.set_shader_parameter("pixel_resolution", entry["pixel_resolution"])
+		material.set_shader_parameter("planet_radius", entry["radius"])
+		material.set_shader_parameter("body_type", entry["body_type"])
+		material.set_shader_parameter("local_light_dir", entry["light_dir"])
+		material.set_shader_parameter("lighting_strength", 0.86)
+		material.set_shader_parameter("climate_shift", climate_visual)
+		_apply_impact_to_material(entry)
+		_configure_moons(entry)
+
+	auto_rotation_speed = float(entry["rotation_speed"])
+	title_label.text = str(entry["title"])
+	subtitle_label.text = str(entry["subtitle"]).to_upper()
+	info_label.text = _format_info_line(entry)
+	meteor_button.text = "METEOR"
+	meteor_button.disabled = entry.get("kind", "world") != "world" or meteor_active
+	freeze_button.disabled = entry.get("kind", "world") != "world"
+	heat_button.disabled = entry.get("kind", "world") != "world"
+	_apply_celestial_transform()
+	_update_rotation_uniforms()
+	_update_buttons()
+
+func _configure_moons(entry: Dictionary) -> void:
+	moon_specs = entry.get("moons", [])
+	var moon_nodes := [moon_a, moon_b]
+	for i in range(moon_nodes.size()):
+		var moon: ColorRect = moon_nodes[i]
+		if i < moon_specs.size():
+			var spec := moon_specs[i]
+			moon.size = Vector2.ONE * float(spec["size"])
+			moon.pivot_offset = moon.size * 0.5
+			var mat := moon.material as ShaderMaterial
+			mat.shader = WORLD_SHADER
+			mat.set_shader_parameter("seed", spec["seed"])
+			mat.set_shader_parameter("pixel_resolution", 96.0)
+			mat.set_shader_parameter("planet_radius", 0.78)
+			mat.set_shader_parameter("body_type", spec["body_type"])
+			mat.set_shader_parameter("local_light_dir", entry["light_dir"])
+			mat.set_shader_parameter("lighting_strength", 0.80)
+			mat.set_shader_parameter("climate_shift", 0.0)
+			mat.set_shader_parameter("impact_enabled", false)
+			moon.visible = true
+		else:
+			moon.visible = false
+
+func _format_info_line(entry: Dictionary) -> String:
+	if entry.is_empty():
+		return ""
+	if entry.get("kind", "world") == "star":
+		return "TEMP %d K  STELLAR PLASMA" % _base_temperature(entry)
+
+	var base_temp := _base_temperature(entry)
+	var body_type := int(entry.get("body_type", 0))
+	var temp_scale := 150.0
+	if body_type == 3:
+		temp_scale = 110.0
+	elif body_type == 4:
+		temp_scale = 320.0
+	var displayed_temp := base_temp + int(round(climate_visual * temp_scale))
+	var base_water := int(entry.get("water", 0))
+	var displayed_water = clamp(base_water - int(max(climate_visual, 0.0) * 28.0), 0, 100)
+	var base_hab := int(entry.get("habitability", 0))
+	var displayed_hab = clamp(base_hab - int(abs(climate_visual) * 52.0), 0, 100)
+	var moon_count := (entry.get("moons", []) as Array).size()
+	var line := "TEMP %d C  WATER %d  HAB %d  MOONS %d" % [displayed_temp, displayed_water, displayed_hab, moon_count]
+	if entry.get("impact_enabled", false):
+		line += "  CRATER 1"
+	return line
+
+func _base_temperature(entry: Dictionary) -> int:
+	if entry.has("base_temperature"):
+		return int(entry["base_temperature"])
+	var temperature_text := str(entry.get("temperature_text", "0"))
+	var cleaned := temperature_text.replace("°", "").replace("C", "").replace("K", "").strip_edges()
+	return int(cleaned)
+
+func _build_random_entry() -> Dictionary:
+	var seed_value := rng.randi_range(1000, 999999)
+	var light_dir := Vector3(rng.randf_range(-0.75, -0.25), rng.randf_range(-0.35, 0.25), rng.randf_range(0.55, 0.92)).normalized()
+	var roll := rng.randi_range(0, 99)
+	var is_star := roll < 18
+	if is_star:
+		var class_index := rng.randi_range(0, STAR_CLASSES.size() - 1)
+		var palette := _star_palette(class_index)
+		var star_temp = [3200, 4500, 5800, 7200, 9400][class_index]
+		return {
+			"kind": "star",
+			"seed": float(seed_value),
+			"title": _make_name(true),
+			"subtitle": STAR_CLASSES[class_index],
+			"core_color": palette[0],
+			"mid_color": palette[1],
+			"edge_color": palette[2],
+			"glow_color": palette[3],
+			"radius": rng.randf_range(0.72, 0.82),
+			"pixel_resolution": 128.0,
+			"rotation_speed": rng.randf_range(0.05, 0.10),
+			"base_temperature": star_temp,
+			"temperature_text": "%d K" % star_temp,
+			"water": -1,
+			"habitability": 0,
+			"light_dir": light_dir
+		}
+
+	var world_index := _weighted_world_type()
+	var moon_count := rng.randi_range(1, 2) if world_index == 3 else rng.randi_range(0, 2)
+	var atmosphere := "UNKNOWN"
+	var temp_value := 0
+	var water := 0
+	var habitability := 0
+
+	match world_index:
+		0:
+			atmosphere = ["BREATHABLE NITROGEN OXYGEN", "TEMPERATE CLOUD LAYER", "OCEANIC AIR MASS"][rng.randi_range(0, 2)]
+			temp_value = rng.randi_range(-8, 34)
+			water = rng.randi_range(42, 86)
+			habitability = rng.randi_range(48, 93)
+		1:
+			atmosphere = ["THIN DUST ATMOSPHERE", "ARID MINERAL HAZE", "DRY CO2 LAYER"][rng.randi_range(0, 2)]
+			temp_value = rng.randi_range(14, 96)
+			water = rng.randi_range(0, 22)
+			habitability = rng.randi_range(4, 30)
+		2:
+			atmosphere = ["FROZEN METHANE HAZE", "THIN CRYOGENIC AIR", "SUBSURFACE VAPOR TRACES"][rng.randi_range(0, 2)]
+			temp_value = rng.randi_range(-170, -6)
+			water = rng.randi_range(38, 97)
+			habitability = rng.randi_range(0, 18)
+		3:
+			atmosphere = ["HYDROGEN HELIUM ENVELOPE", "BAND STORM SYSTEM", "DEEP AMMONIA CLOUDS"][rng.randi_range(0, 2)]
+			temp_value = rng.randi_range(-140, 90)
+			water = rng.randi_range(0, 5)
+			habitability = 0
+		4:
+			atmosphere = ["VOLCANIC ASH PLUME", "SULFURIC FUMES", "SUPERHEATED MINERAL VAPOR"][rng.randi_range(0, 2)]
+			temp_value = rng.randi_range(280, 980)
+			water = 0
+			habitability = rng.randi_range(0, 4)
+
+	var moons: Array[Dictionary] = []
+	for i in range(moon_count):
+		var moon_type := 5
+		if world_index == 3 and rng.randf() < 0.35:
+			moon_type = 2
+		moons.append({
+			"seed": float(seed_value + 91 + i * 17),
+			"size": 38.0 + float(i) * 10.0 + rng.randf_range(-4.0, 8.0),
+			"orbit_x": 215.0 + float(i) * 48.0 + rng.randf_range(-8.0, 18.0),
+			"orbit_y": 118.0 + float(i) * 28.0 + rng.randf_range(-6.0, 14.0),
+			"speed": 0.38 + float(i) * 0.09 + rng.randf_range(-0.05, 0.07),
+			"phase": rng.randf_range(0.0, TAU),
+			"body_type": moon_type
+		})
+
+	return {
+		"kind": "world",
+		"body_type": world_index,
+		"seed": float(seed_value),
+		"title": _make_name(false),
+		"subtitle": WORLD_TYPES[world_index],
+		"radius": rng.randf_range(0.73, 0.82),
+		"pixel_resolution": 128.0,
+		"rotation_speed": rng.randf_range(0.07, 0.12),
+		"atmosphere": atmosphere,
+		"base_temperature": temp_value,
+		"temperature_text": "%d C" % temp_value,
+		"water": water,
+		"habitability": habitability,
+		"impact_enabled": false,
+		"impact_center": Vector3(0.0, 0.0, 1.0),
+		"impact_radius": 0.13,
+		"climate_shift": 0.0,
+		"moons": moons,
+		"light_dir": light_dir
+	}
+
+func _weighted_world_type() -> int:
+	var roll := rng.randi_range(0, 99)
+	if roll < 30:
+		return 0
+	elif roll < 48:
+		return 1
+	elif roll < 64:
+		return 2
+	elif roll < 84:
+		return 3
+	return 4
+
+func _update_buttons() -> void:
+	if meteor_active or meteor_target_mode or blackhole_active:
+		return
+	prev_button.disabled = current_index <= 0
+	next_button.disabled = current_index >= discoveries.size() - 1
+	generate_button.disabled = false
+	save_button.disabled = false
+	catalog_button.disabled = false
+	black_hole_button.disabled = current_entry.is_empty()
+	zoom_out_button.disabled = zoom_factor <= 0.665
+	zoom_in_button.disabled = zoom_factor >= 1.455
+	var is_world = current_entry.get("kind", "world") == "world"
+	meteor_button.disabled = not is_world
+	freeze_button.disabled = not is_world
+	heat_button.disabled = not is_world
+
+func _pointer_over_controls(global_position: Vector2) -> bool:
+	if $UI/ActionControls.get_global_rect().has_point(global_position):
+		return true
+	if $UI/NavControls.get_global_rect().has_point(global_position):
+		return true
+	if catalog_panel.visible and catalog_panel.get_global_rect().has_point(global_position):
+		return true
+	return false
+
+func _make_name(is_star: bool) -> String:
+	var starts := ["AR", "VE", "CY", "NO", "TA", "EL", "OR", "LU", "KA", "ZE", "THA", "SOL", "MY", "XA"]
+	var mids := ["ra", "li", "no", "the", "sa", "ve", "ko", "dra", "mi", "ta", "ru", "za", "ion", "os"]
+	var ends := ["-3", "-7", "-9", " PRIME", " MINOR", " IX", " V", "-12", " MAJOR", "-81", " A", " B"]
+	var base = starts[rng.randi_range(0, starts.size() - 1)] + mids[rng.randi_range(0, mids.size() - 1)]
+	if is_star:
+		return base.to_upper() + ends[rng.randi_range(0, ends.size() - 1)]
+	return (base + ends[rng.randi_range(0, ends.size() - 1)]).to_upper()
+
+func _star_palette(class_index: int) -> Array:
+	match class_index:
+		0:
+			return [Color(1.00, 0.74, 0.52), Color(0.98, 0.47, 0.22), Color(0.83, 0.23, 0.10), Color(1.00, 0.42, 0.18)]
+		1:
+			return [Color(1.00, 0.88, 0.58), Color(1.00, 0.68, 0.24), Color(0.97, 0.47, 0.16), Color(1.00, 0.62, 0.21)]
+		2:
+			return [Color(1.00, 0.97, 0.72), Color(1.00, 0.82, 0.32), Color(0.99, 0.56, 0.14), Color(1.00, 0.72, 0.24)]
+		3:
+			return [Color(1.00, 0.99, 0.90), Color(0.98, 0.92, 0.70), Color(0.96, 0.76, 0.44), Color(0.94, 0.86, 0.58)]
+		_:
+			return [Color(0.90, 0.95, 1.00), Color(0.73, 0.86, 0.99), Color(0.50, 0.70, 0.95), Color(0.58, 0.77, 1.00)]

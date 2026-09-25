@@ -1,7 +1,10 @@
 shader_type canvas_item;
 render_mode unshaded;
 
-uniform float pixel_resolution : hint_range(90.0, 360.0, 1.0) = 180.0;
+// Chunkier pixel-art stars: each star is one 4x4 logical pixel cell.
+// This restores the readable size of the earlier star-field versions while
+// keeping every star square at 16:9 instead of stretching UV cells.
+uniform float star_pixel_size : hint_range(2.0, 8.0, 1.0) = 4.0;
 
 float hash21(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -10,15 +13,21 @@ float hash21(vec2 p) {
 }
 
 void fragment() {
-    vec2 px = floor(UV * pixel_resolution);
-    float h = hash21(px);
-    float star = step(0.9905, h);
-    float bright = step(0.9984, h);
+    vec2 cell = floor(FRAGCOORD.xy / star_pixel_size);
+    float h = hash21(cell);
 
-    vec3 bg_top = vec3(0.002, 0.004, 0.012);
-    vec3 bg_bottom = vec3(0.004, 0.009, 0.022);
+    // Roughly the same visual density as the older 180-cell shader.
+    float star = step(0.9948, h);
+    float bright = step(0.9990, h);
+    float warm = step(0.99972, h);
+
+    vec3 bg_top = vec3(0.0012, 0.0024, 0.0068);
+    vec3 bg_bottom = vec3(0.0024, 0.0052, 0.0125);
     vec3 col = mix(bg_top, bg_bottom, UV.y);
-    col += vec3(0.12, 0.17, 0.22) * star;
-    col += vec3(0.24, 0.27, 0.31) * bright;
+
+    col += vec3(0.20, 0.27, 0.34) * star;
+    col += vec3(0.52, 0.65, 0.76) * bright;
+    col += vec3(0.88, 0.86, 0.72) * warm;
+
     COLOR = vec4(col, 1.0);
 }

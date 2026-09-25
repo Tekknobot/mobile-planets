@@ -11,6 +11,8 @@ uniform float lighting_strength : hint_range(0.0, 1.0) = 0.92;
 uniform bool impact_enabled = false;
 uniform vec3 impact_center = vec3(0.0, 0.0, 1.0);
 uniform float impact_radius : hint_range(0.04, 0.30) = 0.13;
+uniform float climate_shift : hint_range(-1.0, 1.0) = 0.0;
+uniform float blackhole_dissolve : hint_range(0.0, 1.0) = 0.0;
 
 float hash31(vec3 p) {
     p = fract(p * 0.1031);
@@ -69,6 +71,15 @@ vec3 rotate_x(vec3 p, float a) {
     return vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
 }
 
+vec3 posterize_color(vec3 color, float levels) {
+    return floor(clamp(color, vec3(0.0), vec3(1.0)) * levels + 0.5) / levels;
+}
+
+vec3 boost_saturation(vec3 color, float amount) {
+    float luma = dot(color, vec3(0.299, 0.587, 0.114));
+    return mix(vec3(luma), color, amount);
+}
+
 void fragment() {
     vec2 q_uv = (floor(UV * pixel_resolution) + 0.5) / pixel_resolution;
     vec2 p = (q_uv * 2.0 - 1.0) / planet_radius;
@@ -92,6 +103,12 @@ void fragment() {
         atmosphere_color = vec3(0.36, 0.38, 0.42);
         atmosphere_strength = 0.10;
     }
+
+    float heat = max(climate_shift, 0.0);
+    float freeze = max(-climate_shift, 0.0);
+    atmosphere_color = mix(atmosphere_color, vec3(0.92, 0.38, 0.16), heat * 0.34);
+    atmosphere_color = mix(atmosphere_color, vec3(0.55, 0.84, 0.98), freeze * 0.42);
+    atmosphere_strength = clamp(atmosphere_strength + freeze * 0.08 - heat * 0.08, 0.08, 0.82);
 
     if (d > 1.0) {
         if (d <= 1.08) {
@@ -142,7 +159,7 @@ void fragment() {
             }
 
             float ice_noise = fbm(sample_pos * 5.3 + seed_offset * 0.82 + vec3(7.0, 19.0, 3.0));
-            float ice_edge = 0.74 - (ice_noise - 0.5) * 0.105;
+            float ice_edge = 0.74 - (ice_noise - 0.5) * 0.105 + heat * 0.38 - freeze * 0.44;
             float ice_amount = smoothstep(ice_edge, ice_edge + 0.055, latitude);
             base_color = mix(base_color, mix(vec3(0.79, 0.90, 0.94), vec3(0.93, 0.96, 0.96), smoothstep(0.82, 0.98, latitude)), ice_amount);
 
@@ -150,7 +167,7 @@ void fragment() {
             cloud_pos = rotate_x(cloud_pos, rotation_xy.y * 1.08);
             float clouds = fbm(cloud_pos * 4.25 + seed_offset * 1.31 + vec3(21.0, 3.0, 14.0));
             clouds = smoothstep(0.655, 0.735, clouds) * (1.0 - ice_amount * 0.6);
-            base_color = mix(base_color, vec3(0.82, 0.87, 0.88), clouds * 0.52);
+            base_color = mix(base_color, vec3(0.82, 0.87, 0.88), clouds * (0.52 - heat * 0.20 + freeze * 0.06));
 
         } else if (body_type == 1) {
             float surface = fbm(sample_pos * 2.2 + seed_offset);
@@ -200,6 +217,32 @@ void fragment() {
             base_color = mix(base_color, vec3(0.22, 0.22, 0.24), maria * 0.45);
         }
 
+        // Smooth climate controls alter the current generated body without changing its seed.
+        if (body_type == 0) {
+            if (water_mask > 0.5) {
+                base_color = mix(base_color, vec3(0.035, 0.13, 0.24), heat * 0.58);
+                base_color = mix(base_color, vec3(0.73, 0.90, 0.96), freeze * 0.78);
+            } else {
+                base_color = mix(base_color, vec3(0.64, 0.32, 0.13), heat * 0.72);
+                base_color = mix(base_color, vec3(0.79, 0.89, 0.92), freeze * 0.74);
+            }
+        } else if (body_type == 1) {
+            base_color = mix(base_color, vec3(0.88, 0.28, 0.08), heat * 0.55);
+            base_color = mix(base_color, vec3(0.67, 0.79, 0.82), freeze * 0.62);
+        } else if (body_type == 2) {
+            base_color = mix(base_color, vec3(0.20, 0.43, 0.52), heat * 0.72);
+            base_color = mix(base_color, vec3(0.92, 0.98, 1.00), freeze * 0.70);
+        } else if (body_type == 3) {
+            base_color = mix(base_color, vec3(0.90, 0.36, 0.16), heat * 0.48);
+            base_color = mix(base_color, vec3(0.42, 0.68, 0.82), freeze * 0.52);
+        } else if (body_type == 4) {
+            base_color = mix(base_color, vec3(1.00, 0.28, 0.03), heat * 0.42);
+            base_color = mix(base_color, vec3(0.12, 0.15, 0.18), freeze * 0.76);
+        } else {
+            base_color = mix(base_color, vec3(0.64, 0.38, 0.22), heat * 0.24);
+            base_color = mix(base_color, vec3(0.62, 0.70, 0.75), freeze * 0.28);
+        }
+
         // A meteor crater is stored in spherical/sample space, so it remains attached
         // to the generated surface as the player rotates the planet.
         if (impact_enabled && body_type != 3) {
@@ -214,25 +257,58 @@ void fragment() {
             base_color += vec3(0.16, 0.14, 0.12) * rim * 0.42;
         }
 
-        float form = 0.82 + pow(z, 0.82) * 0.18;
-        vec3 lit = base_color * form;
+        // Add a small quantized surface modulation so adjacent terrain pixels stay
+        // distinguishable even on generations with similar palette values.
+        float micro = fbm(sample_pos * 12.0 + seed_offset * 2.47 + vec3(2.0, 9.0, 4.0));
+        float micro_step = floor(micro * 4.0) / 3.0;
+        base_color *= mix(0.90, 1.10, micro_step);
+        base_color = posterize_color(base_color, 16.0);
 
+        // Sunlight is evaluated in the same rotated sample space as the surface.
+        // This makes the stepped light bands rotate coherently with the planet.
         vec3 ldir = normalize(local_light_dir);
-        float diffuse = clamp(dot(sample_pos, ldir), 0.0, 1.0);
-        float stepped = floor(diffuse * 4.0) / 3.0;
+        float ndl = dot(sample_pos, ldir);
+        float daylight = clamp((ndl + 0.18) / 1.18, 0.0, 1.0);
+        float stepped = floor(daylight * 4.999) / 4.0;
         stepped = clamp(stepped, 0.0, 1.0);
-        float light_mix = 0.18 + stepped * 0.82;
-        lit = mix(lit, lit * light_mix, lighting_strength);
 
-        float fresnel = pow(1.0 - z, 2.3);
-        lit = mix(lit, atmosphere_color, clamp(fresnel * atmosphere_strength, 0.0, 0.68));
+        float ambient = 0.34;
+        float light_mix = ambient + stepped * (1.0 - ambient);
+        float form = 0.90 + pow(z, 0.78) * 0.10;
+        vec3 lit = base_color * form;
+        lit *= mix(1.0, light_mix, lighting_strength);
+
+        // A restrained warm lift on the sunward bands keeps the terminator clear
+        // without washing away the procedural terrain colors.
+        float sunward = smoothstep(0.48, 0.92, daylight);
+        lit += base_color * sunward * 0.055;
+
+        float fresnel = pow(1.0 - z, 2.45);
+        lit = mix(lit, atmosphere_color, clamp(fresnel * atmosphere_strength * 0.82, 0.0, 0.52));
 
         if (water_mask > 0.5) {
-            float spec = pow(max(dot(reflect(-ldir, sample_pos), vec3(0.0, 0.0, 1.0)), 0.0), 16.0);
-            spec = step(0.42, spec) * step(0.26, diffuse);
-            lit += vec3(0.15, 0.20, 0.24) * spec;
+            float spec = pow(max(dot(reflect(-ldir, sample_pos), vec3(0.0, 0.0, 1.0)), 0.0), 18.0);
+            spec = step(0.48, spec) * step(0.30, daylight);
+            lit += vec3(0.16, 0.21, 0.25) * spec;
         }
 
+        // Final pixel-palette pass: modest contrast + saturation, then posterize.
+        lit = boost_saturation(lit, 1.14);
+        lit = (lit - vec3(0.5)) * 1.08 + vec3(0.5);
+        lit = posterize_color(lit, 18.0);
+
         COLOR = vec4(clamp(lit, vec3(0.0), vec3(1.0)), 1.0);
+    }
+
+    // During the first black-hole phase, remove surface pixels from the side
+    // facing the hole. The noise only roughens the advancing edge; the grid
+    // stays locked to the same pixel_resolution as the planet artwork.
+    if (blackhole_dissolve > 0.001) {
+        vec2 dissolve_px = floor(q_uv * pixel_resolution);
+        float dissolve_noise = hash31(vec3(dissolve_px * 0.73, seed * 0.017));
+        float edge = 1.0 - blackhole_dissolve;
+        float threshold = edge + (dissolve_noise - 0.5) * 0.055;
+        float removed = step(threshold, q_uv.x);
+        COLOR.a *= 1.0 - removed;
     }
 }

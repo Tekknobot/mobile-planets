@@ -1,0 +1,220 @@
+extends Control
+
+const WORLD_SHADER := preload("res://Shaders/world_generator.gdshader")
+const STAR_SHADER := preload("res://Shaders/star_generator.gdshader")
+
+@onready var planet: ColorRect = $Planet
+@onready var planet_shadow: ColorRect = $PlanetShadow
+@onready var moon_a: ColorRect = $OrbitLayer/MoonA
+@onready var moon_b: ColorRect = $OrbitLayer/MoonB
+@onready var title_label: Label = $UI/Header/Title
+@onready var subtitle_label: Label = $UI/Header/SubTitle
+@onready var info_label: Label = $UI/InfoLine
+@onready var hint_label: Label = $UI/Hint
+@onready var prev_button: Button = $UI/NavControls/Prev
+@onready var generate_button: Button = $UI/NavControls/Generate
+@onready var next_button: Button = $UI/NavControls/Next
+@onready var zoom_out_button: Button = $UI/NavControls/ZoomOut
+@onready var zoom_in_button: Button = $UI/NavControls/ZoomIn
+@onready var freeze_button: Button = $UI/ActionControls/Freeze
+@onready var heat_button: Button = $UI/ActionControls/Heat
+@onready var meteor_button: Button = $UI/ActionControls/Meteor
+@onready var black_hole_button: Button = $UI/ActionControls/BlackHole
+@onready var save_button: Button = $UI/ActionControls/Save
+@onready var catalog_button: Button = $UI/ActionControls/Catalog
+@onready var catalog_panel: PanelContainer = $UI/CatalogPanel
+@onready var catalog_list: ItemList = $UI/CatalogPanel/Margin/VBox/CatalogList
+@onready var catalog_close_button: Button = $UI/CatalogPanel/Margin/VBox/CloseCatalog
+@onready var meteor: Control = $MeteorLayer/Meteor
+@onready var impact_burst: Node2D = $MeteorLayer/ImpactBurst
+@onready var black_hole_effect: Node2D = $MeteorLayer/BlackHoleEffect
+
+var planet_rotation := Vector2(0.45, -0.08)
+var rotation_velocity := Vector2.ZERO
+var dragging := false
+var active_touch := -1
+var last_mouse_pos := Vector2.ZERO
+var auto_rotation_speed := 0.085
+var orbit_time := 0.0
+
+var meteor_active := false
+var meteor_target_mode := false
+var climate_visual := 0.0
+var climate_tween: Tween = null
+var zoom_tween: Tween = null
+var blackhole_tween: Tween = null
+var blackhole_active := false
+
+var zoom_factor := 1.0
+var event_scale := 1.0
+var event_stretch := Vector2.ONE
+var event_offset := Vector2.ZERO
+var planet_base_position := Vector2.ZERO
+var shadow_base_position := Vector2.ZERO
+
+var rng := RandomNumberGenerator.new()
+var discoveries: Array[Dictionary] = []
+var favorites: Array[Dictionary] = []
+var current_index := -1
+var current_entry: Dictionary = {}
+var moon_specs: Array[Dictionary] = []
+
+const WORLD_TYPES := ["Earthlike", "Desert", "Ice", "Gas Giant", "Lava"]
+const STAR_CLASSES := ["M-Type Red Dwarf", "K-Type Orange", "G-Type Yellow", "F-Type White", "A-Type Blue White"]
+
+func _ready() -> void:
+	rng.randomize()
+	_setup_materials()
+	_apply_mago_font()
+	planet_base_position = planet.position
+	shadow_base_position = planet_shadow.position
+	planet.pivot_offset = planet.size * 0.5
+	planet_shadow.pivot_offset = planet_shadow.size * 0.5
+	prev_button.pressed.connect(_show_previous)
+	generate_button.pressed.connect(_generate_new)
+	next_button.pressed.connect(_show_next)
+	zoom_out_button.pressed.connect(_zoom_out)
+	zoom_in_button.pressed.connect(_zoom_in)
+	freeze_button.pressed.connect(_freeze_current)
+	heat_button.pressed.connect(_heat_current)
+	meteor_button.pressed.connect(_trigger_meteor)
+	black_hole_button.pressed.connect(_trigger_blackhole)
+	save_button.pressed.connect(_save_current_to_favorites)
+	catalog_button.pressed.connect(_toggle_catalog)
+	catalog_close_button.pressed.connect(_toggle_catalog)
+	catalog_list.item_selected.connect(_on_catalog_item_selected)
+	hint_label.text = "DRAG TO ROTATE"
+	catalog_panel.visible = false
+	meteor.visible = false
+	black_hole_effect.visible = false
+	_apply_celestial_transform()
+	_load_favorites()
+	_generate_new()
+
+func _setup_materials() -> void:
+	for moon in [moon_a, moon_b]:
+		var moon_material := ShaderMaterial.new()
+		moon_material.shader = WORLD_SHADER
+		moon.material = moon_material
+		moon.visible = false
+
+func _apply_mago_font() -> void:
+	var font_path := _find_pixel_font("res://FONTS")
+	if font_path.is_empty():
+		font_path = _find_pixel_font("res://Fonts")
+	if font_path.is_empty():
+		return
+	var loaded_font := ResourceLoader.load(font_path) as Font
+	if loaded_font == null:
+		return
+	var ui_theme := $UI.theme.duplicate() as Theme
+	ui_theme.default_font = loaded_font
+	$UI.theme = ui_theme
+
+func _find_pixel_font(directory_path: String) -> String:
+	var directory := DirAccess.open(directory_path)
+	if directory == null:
+		return ""
+	directory.list_dir_begin()
+	var fallback := ""
+	while true:
+		var file_name := directory.get_next()
+		if file_name.is_empty():
+			break
+		if file_name.begins_with("."):
+			continue
+		var full_path := directory_path.path_join(file_name)
+		if directory.current_is_dir():
+			var nested := _find_pixel_font(full_path)
+			if not nested.is_empty():
+				if nested.get_file().to_lower().contains("mago"):
+					directory.list_dir_end()
+					return nested
+				if fallback.is_empty():
+					fallback = nested
+		else:
+			var extension := file_name.get_extension().to_lower()
+			if extension == "ttf" or extension == "otf":
+				if file_name.to_lower().contains("mago"):
+					directory.list_dir_end()
+					return full_path
+				if fallback.is_empty():
+					fallback = full_path
+	directory.list_dir_end()
+	return fallback
+
+func _process(delta: float) -> void:
+	orbit_time += delta
+	if blackhole_active:
+		planet_rotation.x += auto_rotation_speed * 4.0 * delta
+	elif not dragging and not meteor_target_mode:
+		if rotation_velocity.length() > 0.001:
+			planet_rotation += rotation_velocity * delta
+			rotation_velocity = rotation_velocity.move_toward(Vector2.ZERO, 1.65 * delta)
+		else:
+			planet_rotation.x += auto_rotation_speed * delta
+
+	planet_rotation.y = clamp(planet_rotation.y, -1.35, 1.35)
+	_apply_celestial_transform()
+	_update_rotation_uniforms()
+	_update_moons()
+
+func _input(event: InputEvent) -> void:
+	if blackhole_active:
+		return
+
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_change_zoom(0.10)
+			return
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_change_zoom(-0.10)
+			return
+
+	if meteor_target_mode:
+		if event is InputEventScreenTouch and event.pressed:
+			if not _pointer_over_controls(event.position):
+				_attempt_meteor_target(event.position)
+			return
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+			if not _pointer_over_controls(event.position):
+				_attempt_meteor_target(event.position)
+			return
+		return
+
+	if event is InputEventScreenTouch:
+		if event.pressed and _pointer_over_controls(event.position):
+			return
+		if event.pressed and active_touch == -1:
+			active_touch = event.index
+			dragging = true
+			rotation_velocity = Vector2.ZERO
+			hint_label.text = "ROTATING"
+		elif not event.pressed and event.index == active_touch:
+			active_touch = -1
+			dragging = false
+			hint_label.text = "DRAG TO ROTATE"
+	elif event is InputEventScreenDrag and event.index == active_touch:
+		_apply_drag(event.relative)
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed and _pointer_over_controls(event.position):
+			return
+		dragging = event.pressed
+		if event.pressed:
+			rotation_velocity = Vector2.ZERO
+		last_mouse_pos = event.position
+		hint_label.text = "ROTATING" if event.pressed else "DRAG TO ROTATE"
+	elif event is InputEventMouseMotion and dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		var drag_delta = event.position - last_mouse_pos
+		last_mouse_pos = event.position
+		_apply_drag(drag_delta)
+
+func _apply_drag(relative: Vector2) -> void:
+	var delta_rotation := relative * 0.0105
+	planet_rotation.x += delta_rotation.x
+	planet_rotation.y += delta_rotation.y
+	planet_rotation.y = clamp(planet_rotation.y, -1.35, 1.35)
+	rotation_velocity = delta_rotation * 11.0
+	_update_rotation_uniforms()
+
+func _generate_new() -> void:

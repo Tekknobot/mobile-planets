@@ -1,0 +1,300 @@
+	_cancel_meteor_target(false)
+	if current_index < discoveries.size() - 1:
+		discoveries = discoveries.slice(0, current_index + 1)
+	var entry := _build_random_entry()
+	discoveries.append(entry)
+	current_index = discoveries.size() - 1
+	_apply_entry(entry)
+
+func _show_previous() -> void:
+	_cancel_meteor_target(false)
+	if current_index > 0:
+		current_index -= 1
+		_apply_entry(discoveries[current_index])
+
+func _show_next() -> void:
+	_cancel_meteor_target(false)
+	if current_index < discoveries.size() - 1:
+		current_index += 1
+		_apply_entry(discoveries[current_index])
+
+func _freeze_current() -> void:
+	_adjust_climate(-0.34)
+
+func _heat_current() -> void:
+	_adjust_climate(0.34)
+
+func _adjust_climate(amount: float) -> void:
+	if current_entry.is_empty() or current_entry.get("kind", "world") != "world":
+		hint_label.text = "CLIMATE CONTROL UNAVAILABLE"
+		return
+	if meteor_active or meteor_target_mode:
+		return
+
+	var target = clamp(climate_visual + amount, -1.0, 1.0)
+	if is_equal_approx(target, climate_visual):
+		hint_label.text = "CLIMATE LIMIT REACHED"
+		return
+
+	if climate_tween != null and climate_tween.is_valid():
+		climate_tween.kill()
+	rotation_velocity = Vector2.ZERO
+	hint_label.text = "FREEZING WORLD" if amount < 0.0 else "HEATING WORLD"
+	climate_tween = create_tween()
+	climate_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	climate_tween.tween_method(_set_climate_visual, climate_visual, target, 1.65)
+	climate_tween.tween_callback(_finish_climate.bind(target))
+
+func _set_climate_visual(value: float) -> void:
+	climate_visual = value
+	var material := planet.material as ShaderMaterial
+	if material and current_entry.get("kind", "world") == "world":
+		material.set_shader_parameter("climate_shift", climate_visual)
+	info_label.text = _format_info_line(current_entry)
+
+func _finish_climate(value: float) -> void:
+	climate_visual = value
+	current_entry["climate_shift"] = value
+	if current_index >= 0 and current_index < discoveries.size():
+		discoveries[current_index] = current_entry.duplicate(true)
+	info_label.text = _format_info_line(current_entry)
+	hint_label.text = "CLIMATE STABILIZED"
+
+func _trigger_meteor() -> void:
+	if meteor_active or current_entry.is_empty():
+		return
+	if current_entry.get("kind", "world") != "world":
+		hint_label.text = "NO PLANETARY TARGET"
+		return
+	if meteor_target_mode:
+		_cancel_meteor_target(true)
+		return
+
+	meteor_target_mode = true
+	rotation_velocity = Vector2.ZERO
+	dragging = false
+	active_touch = -1
+	meteor_button.text = "CANCEL"
+	hint_label.text = "TAP PLANET TO TARGET"
+	_set_event_controls_disabled(true, false)
+
+func _cancel_meteor_target(show_hint: bool) -> void:
+	if not meteor_target_mode:
+		return
+	meteor_target_mode = false
+	meteor_button.text = "METEOR"
+	_set_event_controls_disabled(false, false)
+	_update_buttons()
+	if show_hint:
+		hint_label.text = "METEOR TARGETING CANCELED"
+
+func _attempt_meteor_target(screen_position: Vector2) -> void:
+	# Convert the screen tap back into the planet's local pixel space so targeting
+	# remains exact at every zoom level.
+	var local_position: Vector2 = planet.get_global_transform().affine_inverse() * screen_position
+	var center := planet.size * 0.5
+	var visual_radius: float = planet.size.x * 0.5 * float(current_entry.get("radius", 0.78))
+	if visual_radius <= 0.0:
+		return
+	var target_p := (local_position - center) / visual_radius
+	if target_p.length() > 0.97:
+		hint_label.text = "TAP DIRECTLY ON PLANET"
+		return
+	_launch_meteor(screen_position, target_p)
+
+func _launch_meteor(target: Vector2, target_p: Vector2) -> void:
+	meteor_target_mode = false
+	meteor_active = true
+	meteor_button.text = "METEOR"
+	_set_event_controls_disabled(true, true)
+	rotation_velocity = Vector2.ZERO
+	hint_label.text = "METEOR INBOUND"
+
+	var start := target + Vector2(rng.randf_range(300.0, 430.0), rng.randf_range(-340.0, -240.0))
+	var direction := target - start
+	meteor.position = start - meteor.pivot_offset
+	meteor.rotation = direction.angle()
+	meteor.modulate = Color(1, 1, 1, 1)
+	meteor.visible = true
+
+	var tween := create_tween()
+	tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(meteor, "position", target - meteor.pivot_offset, 0.72)
+	tween.tween_callback(_meteor_impact.bind(target, target_p))
+
+func _meteor_impact(target: Vector2, target_p: Vector2) -> void:
+	meteor.visible = false
+	if impact_burst.has_method("burst"):
+		impact_burst.call("burst", target)
+
+	var body_type := int(current_entry.get("body_type", 0))
+	if body_type == 3:
+		hint_label.text = "METEOR LOST IN DEEP ATMOSPHERE"
+	else:
+		var z := sqrt(max(0.0, 1.0 - target_p.dot(target_p)))
+		var normal := Vector3(target_p.x, target_p.y, z).normalized()
+		var impact_center := _rotate_y_vec3(normal, planet_rotation.x)
+		impact_center = _rotate_x_vec3(impact_center, planet_rotation.y).normalized()
+		current_entry["impact_enabled"] = true
+		current_entry["impact_center"] = impact_center
+		current_entry["impact_radius"] = rng.randf_range(0.105, 0.155)
+		_apply_impact_to_material(current_entry)
+		if current_index >= 0 and current_index < discoveries.size():
+			discoveries[current_index] = current_entry.duplicate(true)
+		info_label.text = _format_info_line(current_entry)
+		hint_label.text = "IMPACT CRATER FORMED"
+
+	meteor_active = false
+	_set_event_controls_disabled(false, false)
+	_update_buttons()
+
+func _set_event_controls_disabled(disabled: bool, disable_meteor: bool) -> void:
+	prev_button.disabled = disabled
+	generate_button.disabled = disabled
+	next_button.disabled = disabled
+	freeze_button.disabled = disabled
+	heat_button.disabled = disabled
+	save_button.disabled = disabled
+	catalog_button.disabled = disabled
+	black_hole_button.disabled = disabled
+	zoom_out_button.disabled = disabled
+	zoom_in_button.disabled = disabled
+	meteor_button.disabled = disabled if disable_meteor else false
+
+func _apply_impact_to_material(entry: Dictionary) -> void:
+	var material := planet.material as ShaderMaterial
+	if material == null or entry.get("kind", "world") != "world":
+		return
+	material.set_shader_parameter("impact_enabled", bool(entry.get("impact_enabled", false)))
+	material.set_shader_parameter("impact_center", entry.get("impact_center", Vector3(0.0, 0.0, 1.0)))
+	material.set_shader_parameter("impact_radius", float(entry.get("impact_radius", 0.13)))
+
+func _rotate_y_vec3(v: Vector3, angle: float) -> Vector3:
+	var c := cos(angle)
+	var sn := sin(angle)
+	return Vector3(c * v.x + sn * v.z, v.y, -sn * v.x + c * v.z)
+
+func _rotate_x_vec3(v: Vector3, angle: float) -> Vector3:
+	var c := cos(angle)
+	var sn := sin(angle)
+	return Vector3(v.x, c * v.y - sn * v.z, sn * v.y + c * v.z)
+
+func _zoom_out() -> void:
+	_change_zoom(-0.12)
+
+func _zoom_in() -> void:
+	_change_zoom(0.12)
+
+func _change_zoom(amount: float) -> void:
+	if blackhole_active or meteor_active or meteor_target_mode:
+		return
+	var target := clamp(zoom_factor + amount, 0.66, 1.46)
+	if is_equal_approx(target, zoom_factor):
+		return
+	if zoom_tween != null and zoom_tween.is_valid():
+		zoom_tween.kill()
+	zoom_tween = create_tween()
+	zoom_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	zoom_tween.tween_property(self, "zoom_factor", target, 0.22)
+	hint_label.text = "ZOOM %d" % int(round(target * 100.0))
+
+func _apply_celestial_transform() -> void:
+	var combined := zoom_factor * event_scale
+	planet.position = planet_base_position + event_offset
+	planet_shadow.position = shadow_base_position + event_offset
+	planet.scale = Vector2(combined * event_stretch.x, combined * event_stretch.y)
+	planet_shadow.scale = Vector2(combined * event_stretch.x, combined * event_stretch.y)
+
+func _trigger_blackhole() -> void:
+	if blackhole_active or meteor_active or current_entry.is_empty():
+		return
+	_cancel_meteor_target(false)
+	blackhole_active = true
+	dragging = false
+	active_touch = -1
+	rotation_velocity = Vector2.ZERO
+	if climate_tween != null and climate_tween.is_valid():
+		climate_tween.kill()
+	if zoom_tween != null and zoom_tween.is_valid():
+		zoom_tween.kill()
+	_set_event_controls_disabled(true, true)
+	black_hole_button.disabled = true
+	hint_label.text = "GRAVITATIONAL ANOMALY DETECTED"
+
+	event_scale = 1.0
+	event_stretch = Vector2.ONE
+	event_offset = Vector2.ZERO
+	planet.modulate = Color.WHITE
+	planet_shadow.modulate = Color(1, 1, 1, 1)
+	moon_a.modulate = Color.WHITE
+	moon_b.modulate = Color.WHITE
+
+	var viewport_size := get_viewport_rect().size
+	var hole_center := Vector2(viewport_size.x * 0.79, viewport_size.y * 0.47)
+	if black_hole_effect.has_method("start"):
+		black_hole_effect.call("start", hole_center, viewport_size)
+
+	var planet_center := planet_base_position + planet.size * 0.5
+	var pull_vector := hole_center - planet_center
+	blackhole_tween = create_tween()
+	blackhole_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	blackhole_tween.tween_interval(0.55)
+	blackhole_tween.tween_callback(func() -> void: hint_label.text = "TIDAL FORCES RISING")
+	blackhole_tween.tween_property(self, "event_scale", 0.88, 0.58)
+	blackhole_tween.parallel().tween_property(self, "event_offset", pull_vector * 0.13, 0.58)
+	blackhole_tween.tween_callback(func() -> void: hint_label.text = "ACCRETION CAPTURE")
+	blackhole_tween.tween_property(self, "event_scale", 0.56, 0.86)
+	blackhole_tween.parallel().tween_property(self, "event_stretch", Vector2(1.42, 0.76), 0.86)
+	blackhole_tween.parallel().tween_property(self, "event_offset", pull_vector * 0.58, 0.86)
+	blackhole_tween.tween_callback(func() -> void: hint_label.text = "EVENT HORIZON")
+	blackhole_tween.tween_property(self, "event_scale", 0.08, 0.72)
+	blackhole_tween.parallel().tween_property(self, "event_stretch", Vector2(2.5, 0.22), 0.72)
+	blackhole_tween.parallel().tween_property(self, "event_offset", pull_vector, 0.72)
+	blackhole_tween.parallel().tween_property(planet, "modulate", Color(1, 1, 1, 0), 0.72)
+	blackhole_tween.parallel().tween_property(planet_shadow, "modulate", Color(1, 1, 1, 0), 0.72)
+	blackhole_tween.parallel().tween_property(moon_a, "modulate", Color(1, 1, 1, 0), 0.72)
+	blackhole_tween.parallel().tween_property(moon_b, "modulate", Color(1, 1, 1, 0), 0.72)
+	blackhole_tween.tween_callback(_finish_blackhole)
+
+func _finish_blackhole() -> void:
+	hint_label.text = "OBJECT CONSUMED"
+	var post := create_tween()
+	post.tween_interval(0.60)
+	post.tween_callback(_reset_after_blackhole)
+
+func _reset_after_blackhole() -> void:
+	if black_hole_effect.has_method("stop"):
+		black_hole_effect.call("stop")
+	event_scale = 1.0
+	event_stretch = Vector2.ONE
+	event_offset = Vector2.ZERO
+	planet.modulate = Color.WHITE
+	planet_shadow.modulate = Color.WHITE
+	moon_a.modulate = Color.WHITE
+	moon_b.modulate = Color.WHITE
+	blackhole_active = false
+	_apply_celestial_transform()
+	_generate_new()
+	hint_label.text = "NEW DISCOVERY"
+
+func _save_current_to_favorites() -> void:
+	if current_entry.is_empty():
+		return
+	var signature := "%s|%s" % [str(current_entry.get("title", "")), str(current_entry.get("seed", ""))]
+	for i in range(favorites.size()):
+		var entry := favorites[i]
+		var existing_signature := "%s|%s" % [str(entry.get("title", "")), str(entry.get("seed", ""))]
+		if existing_signature == signature:
+			favorites[i] = current_entry.duplicate(true)
+			_persist_favorites()
+			_update_catalog_list()
+			hint_label.text = "CATALOG ENTRY UPDATED"
+			return
+	favorites.append(current_entry.duplicate(true))
+	_persist_favorites()
+	_update_catalog_list()
+	hint_label.text = "SAVED TO CATALOG"
+
+func _persist_favorites() -> void:
+	var file := FileAccess.open("user://planet_favorites.save", FileAccess.WRITE)
+	if file:
