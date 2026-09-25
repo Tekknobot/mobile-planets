@@ -14,6 +14,8 @@ uniform vec3 glow_color = vec3(1.00, 0.68, 0.22);
 uniform vec3 local_light_dir = vec3(-0.65, -0.25, 0.72);
 uniform float lighting_strength : hint_range(0.0, 1.0) = 0.55;
 uniform float blackhole_dissolve : hint_range(0.0, 1.0) = 0.0;
+uniform float flare_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float flare_angle : hint_range(-6.28318, 6.28318) = 0.0;
 
 float hash11(float p) {
     return fract(sin(p * 127.1) * 43758.5453123);
@@ -82,16 +84,21 @@ void fragment() {
     float d = length(p);
 
     if (d > 1.0) {
-        if (d <= 1.16) {
-            float glow = 1.0 - smoothstep(1.0, 1.16, d);
+        vec2 flare_dir = vec2(cos(flare_angle), sin(flare_angle));
+        vec2 safe_p = normalize(p + vec2(0.0001, 0.0));
+        float flare_alignment = dot(safe_p, flare_dir);
+        float flare_beam = smoothstep(0.91, 0.995, flare_alignment) * (1.0 - smoothstep(1.02, 1.52, d)) * flare_strength;
+        float flare_knots = 0.55 + 0.45 * fbm(vec3(q_uv * 18.0, seed * 0.031));
+        flare_beam *= flare_knots;
 
+        if (d <= 1.18 || flare_beam > 0.001) {
+            float glow = 1.0 - smoothstep(1.0, 1.18, d);
             float corona_noise = fbm(vec3(q_uv * 8.0, seed * 0.021));
             float corona_variation = mix(0.82, 1.18, corona_noise);
-
-            float alpha = floor(glow * 4.0) / 4.0;
+            float alpha = floor(max(glow, flare_beam) * 4.0) / 4.0;
             vec3 corona = glow_color * (0.38 + glow * 0.62) * corona_variation;
-
-            COLOR = vec4(corona, alpha * 0.76);
+            corona += mix(glow_color, core_color, 0.65) * flare_beam * 1.45;
+            COLOR = vec4(corona, max(alpha * 0.76, flare_beam));
         } else {
             COLOR = vec4(0.0);
         }
@@ -173,6 +180,12 @@ void fragment() {
 
         // Slight color lift so dark stars do not go muddy.
         lit = mix(lit, lit * vec3(1.03, 1.01, 0.98), 0.30);
+
+        // Interactive flare hotspot on the limb.
+        vec2 flare_dir = vec2(cos(flare_angle), sin(flare_angle));
+        vec2 safe_p = normalize(p + vec2(0.0001, 0.0));
+        float flare_hotspot = smoothstep(0.84, 0.99, dot(safe_p, flare_dir)) * smoothstep(0.55, 0.96, d) * flare_strength;
+        lit += mix(glow_color, core_color, 0.60) * flare_hotspot * 0.38;
 
         // Posterize to keep the pixel-art look.
         lit = floor(clamp(lit, vec3(0.0), vec3(1.0)) * 18.0 + 0.5) / 18.0;

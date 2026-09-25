@@ -5,6 +5,8 @@
 [ext_resource type="Shader" uid="uid://d3dx2hqlhpdo4" path="res://Shaders/world_generator.gdshader" id="3_world"]
 [ext_resource type="Script" uid="uid://baw4i8ml2cpgc" path="res://Scripts/impact_burst.gd" id="4_burst"]
 [ext_resource type="Script" uid="uid://bhn22ldxa41qy" path="res://Scripts/black_hole_effect.gd" id="5_blackhole"]
+[ext_resource type="Script" path="res://Scripts/radial_menu.gd" id="6_radial"]
+[ext_resource type="Script" path="res://Scripts/war_overlay.gd" id="7_war"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_stars"]
 shader = ExtResource("2_stars")
@@ -24,6 +26,14 @@ shader_parameter/impact_center = Vector3(0, 0, 1)
 shader_parameter/impact_radius = 0.13
 shader_parameter/climate_shift = 0.0
 shader_parameter/blackhole_dissolve = 0.0
+shader_parameter/water_level = 0.55
+shader_parameter/atmosphere_level = 0.7
+shader_parameter/life_level = 0.0
+shader_parameter/civilization_level = 0.0
+shader_parameter/storm_enabled = false
+shader_parameter/storm_center = Vector3(0, 0, 1)
+shader_parameter/storm_radius = 0.18
+shader_parameter/storm_strength = 0.0
 
 [sub_resource type="SystemFont" id="SystemFont_pixel"]
 font_names = PackedStringArray("Monaco", "Menlo", "Courier New", "Liberation Mono", "monospace")
@@ -217,6 +227,9 @@ script = ExtResource("4_burst")
 visible = false
 script = ExtResource("5_blackhole")
 
+[node name="WarOverlay" type="Node2D" parent="MeteorLayer"]
+script = ExtResource("7_war")
+
 [node name="UI" type="Control" parent="." unique_id=1275494572]
 layout_mode = 1
 anchors_preset = 15
@@ -259,7 +272,7 @@ anchor_right = 0.95
 anchor_bottom = 0.755
 theme_override_colors/font_color = Color(0.68, 0.78, 0.84, 1)
 theme_override_font_sizes/font_size = 32
-text = "TEMP 18 C  WATER 63  HAB 81  MOONS 1"
+text = "YOU 3  ENEMY 5  TENSION 42"
 horizontal_alignment = 1
 vertical_alignment = 1
 
@@ -272,11 +285,17 @@ anchor_right = 0.92
 anchor_bottom = 0.805
 theme_override_colors/font_color = Color(0.38, 0.55, 0.64, 1)
 theme_override_font_sizes/font_size = 32
-text = "DRAG TO ROTATE"
+text = "DRAG TO ROTATE  HOLD FOR WAR"
 horizontal_alignment = 1
 vertical_alignment = 1
 
+[node name="RadialMenu" type="Node2D" parent="UI"]
+visible = false
+z_index = 50
+script = ExtResource("6_radial")
+
 [node name="ActionControls" type="HBoxContainer" parent="UI" unique_id=1700246429]
+visible = false
 layout_mode = 1
 anchors_preset = -1
 anchor_left = 0.03
@@ -361,15 +380,15 @@ text = "CATALOG"
 [node name="NavControls" type="HBoxContainer" parent="UI" unique_id=1337989043]
 layout_mode = 1
 anchors_preset = -1
-anchor_left = 0.08
-anchor_top = 0.905
-anchor_right = 0.92
-anchor_bottom = 0.99
-theme_override_constants/separation = 12
+anchor_left = 0.24
+anchor_top = 0.885
+anchor_right = 0.76
+anchor_bottom = 0.98
+theme_override_constants/separation = 8
 alignment = 1
 
 [node name="Prev" type="Button" parent="UI/NavControls" unique_id=1347793235]
-custom_minimum_size = Vector2(190, 58)
+custom_minimum_size = Vector2(130, 58)
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
 theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
@@ -381,7 +400,7 @@ theme_override_styles/disabled = SubResource("StyleButtonDisabled")
 text = "PREV"
 
 [node name="Generate" type="Button" parent="UI/NavControls" unique_id=635035228]
-custom_minimum_size = Vector2(240, 58)
+custom_minimum_size = Vector2(175, 58)
 layout_mode = 2
 theme_override_colors/font_color = Color(0.77, 0.9, 0.95, 1)
 theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
@@ -393,7 +412,7 @@ theme_override_styles/disabled = SubResource("StyleButtonDisabled")
 text = "GENERATE"
 
 [node name="Next" type="Button" parent="UI/NavControls" unique_id=485290229]
-custom_minimum_size = Vector2(190, 58)
+custom_minimum_size = Vector2(130, 58)
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
 theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
@@ -404,8 +423,48 @@ theme_override_styles/hover = SubResource("StyleButtonHover")
 theme_override_styles/disabled = SubResource("StyleButtonDisabled")
 text = "NEXT"
 
+[node name="Tools" type="Button" parent="UI/NavControls"]
+visible = false
+custom_minimum_size = Vector2(165, 58)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.58, 0.88, 0.72, 1)
+theme_override_colors/font_disabled_color = Color(0.36, 0.44, 0.40, 1)
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "TOOLS"
+
+[node name="Save" type="Button" parent="UI/NavControls"]
+visible = false
+custom_minimum_size = Vector2(120, 58)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
+theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "SAVE"
+
+[node name="Catalog" type="Button" parent="UI/NavControls"]
+visible = false
+custom_minimum_size = Vector2(145, 58)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
+theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "CATALOG"
+
 [node name="ZoomOut" type="Button" parent="UI/NavControls" unique_id=1595180905]
-custom_minimum_size = Vector2(150, 58)
+visible = false
+custom_minimum_size = Vector2(105, 58)
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
 theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
@@ -417,7 +476,8 @@ theme_override_styles/disabled = SubResource("StyleButtonDisabled")
 text = "ZOOM -"
 
 [node name="ZoomIn" type="Button" parent="UI/NavControls" unique_id=1795500138]
-custom_minimum_size = Vector2(150, 58)
+visible = false
+custom_minimum_size = Vector2(105, 58)
 layout_mode = 2
 theme_override_colors/font_color = Color(0.65, 0.8, 0.87, 1)
 theme_override_colors/font_disabled_color = Color(0.4, 0.45, 0.48, 1)
@@ -427,6 +487,145 @@ theme_override_styles/pressed = SubResource("StyleButtonHover")
 theme_override_styles/hover = SubResource("StyleButtonHover")
 theme_override_styles/disabled = SubResource("StyleButtonDisabled")
 text = "ZOOM +"
+
+[node name="ToolsPanel" type="PanelContainer" parent="UI"]
+visible = false
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.635
+anchor_top = 0.18
+anchor_right = 0.965
+anchor_bottom = 0.79
+theme_override_styles/panel = SubResource("StylePanel")
+
+[node name="Margin" type="MarginContainer" parent="UI/ToolsPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 16
+
+[node name="VBox" type="VBoxContainer" parent="UI/ToolsPanel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="UI/ToolsPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.82, 0.9, 0.95, 1)
+theme_override_font_sizes/font_size = 32
+text = "INTERVENTION"
+horizontal_alignment = 1
+
+[node name="Grid" type="GridContainer" parent="UI/ToolsPanel/Margin/VBox"]
+layout_mode = 2
+columns = 2
+theme_override_constants/h_separation = 8
+theme_override_constants/v_separation = 8
+
+[node name="WaterAdd" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "WATER +"
+
+[node name="WaterRemove" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "WATER -"
+
+[node name="AtmosAdd" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "ATMOS +"
+
+[node name="AtmosRemove" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "ATMOS -"
+
+[node name="SeedLife" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "SEED LIFE"
+
+[node name="Evolve" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "EVOLVE"
+
+[node name="Storm" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "STORM"
+
+[node name="TimeAdvance" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "TIME +"
+
+[node name="Flare" type="Button" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "FLARE"
+
+[node name="Spacer" type="Control" parent="UI/ToolsPanel/Margin/VBox/Grid"]
+custom_minimum_size = Vector2(185, 52)
+layout_mode = 2
+mouse_filter = 2
+
+[node name="CloseTools" type="Button" parent="UI/ToolsPanel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 52)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+theme_override_styles/normal = SubResource("StyleButton")
+theme_override_styles/pressed = SubResource("StyleButtonHover")
+theme_override_styles/hover = SubResource("StyleButtonHover")
+theme_override_styles/disabled = SubResource("StyleButtonDisabled")
+text = "CLOSE"
 
 [node name="CatalogPanel" type="PanelContainer" parent="UI" unique_id=1890975260]
 visible = false

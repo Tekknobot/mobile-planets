@@ -29,5 +29,5 @@ void fragment() {
     col += vec3(0.52, 0.65, 0.76) * bright;
     col += vec3(0.88, 0.86, 0.72) * warm;
 
-    COLOR = vec4(col, 1.0);
+    COLOR = vec4(col, 0.5);
 }

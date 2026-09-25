@@ -13,6 +13,14 @@ uniform vec3 impact_center = vec3(0.0, 0.0, 1.0);
 uniform float impact_radius : hint_range(0.04, 0.30) = 0.13;
 uniform float climate_shift : hint_range(-1.0, 1.0) = 0.0;
 uniform float blackhole_dissolve : hint_range(0.0, 1.0) = 0.0;
+uniform float water_level : hint_range(0.0, 1.0) = 0.55;
+uniform float atmosphere_level : hint_range(0.0, 1.0) = 0.70;
+uniform float life_level : hint_range(0.0, 1.0) = 0.0;
+uniform float civilization_level : hint_range(0.0, 1.0) = 0.0;
+uniform bool storm_enabled = false;
+uniform vec3 storm_center = vec3(0.0, 0.0, 1.0);
+uniform float storm_radius : hint_range(0.06, 0.40) = 0.18;
+uniform float storm_strength : hint_range(0.0, 1.0) = 0.0;
 
 float hash31(vec3 p) {
     p = fract(p * 0.1031);
@@ -109,6 +117,7 @@ void fragment() {
     atmosphere_color = mix(atmosphere_color, vec3(0.92, 0.38, 0.16), heat * 0.34);
     atmosphere_color = mix(atmosphere_color, vec3(0.55, 0.84, 0.98), freeze * 0.42);
     atmosphere_strength = clamp(atmosphere_strength + freeze * 0.08 - heat * 0.08, 0.08, 0.82);
+    atmosphere_strength *= mix(0.04, 1.12, atmosphere_level);
 
     if (d > 1.0) {
         if (d <= 1.08) {
@@ -134,7 +143,7 @@ void fragment() {
             float ridges = abs(fbm(sample_pos * 7.4 + seed_offset * 0.61) * 2.0 - 1.0);
             float height = continental * 0.78 + detail * 0.22;
             height -= smoothstep(0.72, 1.0, latitude) * 0.035;
-            float sea_level = 0.535;
+            float sea_level = 0.43 + water_level * 0.19;
 
             if (height < sea_level) {
                 water_mask = 1.0;
@@ -150,7 +159,7 @@ void fragment() {
                 if (elevation < 0.055) {
                     base_color = vec3(0.72, 0.66, 0.38);
                 } else if (elevation < 0.36) {
-                    base_color = mix(vec3(0.13, 0.41, 0.20), vec3(0.05, 0.25, 0.13), smoothstep(0.45, 0.72, moisture));
+                    base_color = mix(vec3(0.38, 0.37, 0.20), vec3(0.20, 0.28, 0.14), smoothstep(0.45, 0.72, moisture));
                 } else if (elevation < 0.63) {
                     base_color = vec3(0.33, 0.36, 0.25);
                 } else {
@@ -167,7 +176,7 @@ void fragment() {
             cloud_pos = rotate_x(cloud_pos, rotation_xy.y * 1.08);
             float clouds = fbm(cloud_pos * 4.25 + seed_offset * 1.31 + vec3(21.0, 3.0, 14.0));
             clouds = smoothstep(0.655, 0.735, clouds) * (1.0 - ice_amount * 0.6);
-            base_color = mix(base_color, vec3(0.82, 0.87, 0.88), clouds * (0.52 - heat * 0.20 + freeze * 0.06));
+            base_color = mix(base_color, vec3(0.82, 0.87, 0.88), clouds * (0.52 - heat * 0.20 + freeze * 0.06) * atmosphere_level);
 
         } else if (body_type == 1) {
             float surface = fbm(sample_pos * 2.2 + seed_offset);
@@ -215,6 +224,63 @@ void fragment() {
             base_color = mix(base_color, vec3(0.61, 0.60, 0.58), smoothstep(0.85, 0.98, crater_field));
             float maria = smoothstep(0.68, 0.90, fbm(sample_pos * 5.5 + seed_offset * 0.6));
             base_color = mix(base_color, vec3(0.22, 0.22, 0.24), maria * 0.45);
+        }
+
+        // Persistent hydrology lets the same procedural world flood or dry out.
+        if ((body_type == 1 || body_type == 2) && water_level > 0.02) {
+            float hydro = fbm(sample_pos * 2.05 + seed_offset * 0.47 + vec3(17.0, 6.0, 3.0));
+            float water_threshold = mix(0.04, 0.72, water_level);
+            float extra_water = 1.0 - smoothstep(water_threshold - 0.055, water_threshold + 0.055, hydro);
+            extra_water *= smoothstep(0.06, 0.18, water_level);
+            if (body_type == 2) {
+                vec3 ice_water = mix(vec3(0.12, 0.34, 0.48), vec3(0.65, 0.88, 0.95), freeze * 0.82);
+                base_color = mix(base_color, ice_water, extra_water * 0.76);
+            } else {
+                base_color = mix(base_color, vec3(0.04, 0.22, 0.39), extra_water * 0.88);
+            }
+            water_mask = max(water_mask, extra_water);
+        }
+
+        // Every generated world supports native life. Terrestrial worlds use
+        // familiar surface biospheres, while hostile worlds use alien visual
+        // signatures that are adapted to their environment.
+        if (life_level > 0.001 && body_type != 5) {
+            float life_noise = fbm(sample_pos * 5.4 + seed_offset * 1.91 + vec3(4.0, 23.0, 8.0));
+            if (body_type == 0 || body_type == 1 || body_type == 2) {
+                float temperate_band = 1.0 - smoothstep(0.72, 0.98, latitude);
+                float life_mask = smoothstep(0.43, 0.72, life_noise) * life_level * temperate_band;
+                life_mask *= 1.0 - clamp(water_mask, 0.0, 1.0);
+                vec3 vegetation = mix(vec3(0.16, 0.38, 0.16), vec3(0.04, 0.24, 0.10), life_noise);
+                if (body_type == 1) { vegetation = mix(vec3(0.32, 0.36, 0.12), vec3(0.10, 0.28, 0.16), life_noise); }
+                if (body_type == 2) { vegetation = mix(vec3(0.18, 0.46, 0.52), vec3(0.28, 0.70, 0.72), life_noise); }
+                base_color = mix(base_color, vegetation, life_mask * 0.72);
+            } else if (body_type == 3) {
+                float aerial_life = smoothstep(0.58, 0.84, life_noise) * life_level;
+                vec3 bioluminescence = mix(vec3(0.16, 0.72, 0.68), vec3(0.42, 0.92, 0.82), life_noise);
+                base_color = mix(base_color, bioluminescence, aerial_life * 0.22);
+            } else if (body_type == 4) {
+                float magma_life = smoothstep(0.63, 0.88, life_noise) * life_level;
+                vec3 mineral_life = mix(vec3(0.08, 0.34, 0.44), vec3(0.20, 0.68, 0.76), life_noise);
+                base_color = mix(base_color, mineral_life, magma_life * 0.28);
+            }
+        }
+
+        // Targeted storms remain attached to spherical surface coordinates.
+        if (storm_enabled && storm_strength > 0.001) {
+            float storm_d = distance(sample_pos, normalize(storm_center));
+            float storm_core = 1.0 - smoothstep(0.0, storm_radius * 0.28, storm_d);
+            float storm_body = 1.0 - smoothstep(storm_radius * 0.18, storm_radius, storm_d);
+            float storm_ring = smoothstep(storm_radius * 0.28, storm_radius * 0.58, storm_d) *
+                               (1.0 - smoothstep(storm_radius * 0.58, storm_radius, storm_d));
+            if (body_type == 3) {
+                base_color = mix(base_color, vec3(0.82, 0.40, 0.22), storm_body * storm_strength * 0.82);
+                base_color = mix(base_color, vec3(0.98, 0.76, 0.48), storm_ring * storm_strength * 0.70);
+                base_color = mix(base_color, vec3(0.42, 0.26, 0.20), storm_core * storm_strength * 0.72);
+            } else {
+                base_color = mix(base_color, vec3(0.20, 0.24, 0.27), storm_body * storm_strength * 0.62);
+                base_color = mix(base_color, vec3(0.74, 0.80, 0.82), storm_ring * storm_strength * 0.64 * atmosphere_level);
+                base_color = mix(base_color, vec3(0.36, 0.44, 0.48), storm_core * storm_strength * 0.36);
+            }
         }
 
         // Smooth climate controls alter the current generated body without changing its seed.
@@ -290,6 +356,27 @@ void fragment() {
             float spec = pow(max(dot(reflect(-ldir, sample_pos), vec3(0.0, 0.0, 1.0)), 0.0), 18.0);
             spec = step(0.48, spec) * step(0.30, daylight);
             lit += vec3(0.16, 0.21, 0.25) * spec;
+        }
+
+        // Alien civilizations appear as sparse night-side energy nodes on every
+        // world type. Their palette changes for gas and lava worlds so the nodes
+        // remain readable against the local surface.
+        if (civilization_level > 0.001 && body_type != 5) {
+            vec3 city_cell = floor((sample_pos + vec3(1.0)) * 43.0);
+            float city_hash = hash31(city_cell + seed_offset * 3.0);
+            float city_cluster = fbm(sample_pos * 5.0 + seed_offset * 2.4 + vec3(31.0, 7.0, 19.0));
+            float night = 1.0 - smoothstep(0.10, 0.34, daylight);
+            float city_threshold = mix(0.996, 0.970, civilization_level);
+            float city_light = step(city_threshold, city_hash) * smoothstep(0.42, 0.70, city_cluster);
+            float terrain_gate = 1.0;
+            if (body_type == 0 || body_type == 1 || body_type == 2) {
+                terrain_gate = 1.0 - clamp(water_mask, 0.0, 1.0);
+            }
+            city_light *= civilization_level * life_level * night * terrain_gate;
+            vec3 city_color = vec3(1.00, 0.68, 0.25);
+            if (body_type == 3) { city_color = vec3(0.28, 0.92, 1.00); }
+            if (body_type == 4) { city_color = vec3(0.52, 0.86, 1.00); }
+            lit += city_color * city_light * 0.96;
         }
 
         // Final pixel-palette pass: modest contrast + saturation, then posterize.
