@@ -2,6 +2,7 @@ extends Control
 
 const WORLD_SHADER := preload("res://Shaders/world_generator.gdshader")
 const STAR_SHADER := preload("res://Shaders/star_generator.gdshader")
+const MAGO_UI_FONT: Font = preload("res://Fonts/mago1.ttf")
 const MAX_WAR_IMPACTS := 32
 const WAR_CONVENTIONAL_DAMAGE := 0.55
 const WAR_DESTROYED_DAMAGE := 0.999
@@ -102,7 +103,7 @@ func _ready() -> void:
 	_setup_materials()
 	_apply_mago_font()
 	if war_overlay.has_method("set_hover_font"):
-		war_overlay.call("set_hover_font", $UI.get_theme_default_font())
+		war_overlay.call("set_hover_font", MAGO_UI_FONT)
 	planet_base_position = planet.position
 	shadow_base_position = planet_shadow.position
 	planet.pivot_offset = planet.size * 0.5
@@ -152,49 +153,11 @@ func _setup_materials() -> void:
 		moon.visible = false
 
 func _apply_mago_font() -> void:
-	var font_path := _find_pixel_font("res://FONTS")
-	if font_path.is_empty():
-		font_path = _find_pixel_font("res://Fonts")
-	if font_path.is_empty():
-		return
-	var loaded_font := ResourceLoader.load(font_path) as Font
-	if loaded_font == null:
-		return
+	# Keep the font as an explicit resource dependency. Runtime directory scans can
+	# fail or return remapped import files in Web exports, causing ThemeDB fallback.
 	var ui_theme := $UI.theme.duplicate() as Theme
-	ui_theme.default_font = loaded_font
+	ui_theme.default_font = MAGO_UI_FONT
 	$UI.theme = ui_theme
-
-func _find_pixel_font(directory_path: String) -> String:
-	var directory := DirAccess.open(directory_path)
-	if directory == null:
-		return ""
-	directory.list_dir_begin()
-	var fallback := ""
-	while true:
-		var file_name := directory.get_next()
-		if file_name.is_empty():
-			break
-		if file_name.begins_with("."):
-			continue
-		var full_path := directory_path.path_join(file_name)
-		if directory.current_is_dir():
-			var nested := _find_pixel_font(full_path)
-			if not nested.is_empty():
-				if nested.get_file().to_lower().contains("mago"):
-					directory.list_dir_end()
-					return nested
-				if fallback.is_empty():
-					fallback = nested
-		else:
-			var extension := file_name.get_extension().to_lower()
-			if extension == "ttf" or extension == "otf":
-				if file_name.to_lower().contains("mago"):
-					directory.list_dir_end()
-					return full_path
-				if fallback.is_empty():
-					fallback = full_path
-	directory.list_dir_end()
-	return fallback
 
 func _process(delta: float) -> void:
 	orbit_time += delta
@@ -501,7 +464,7 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 		war_overlay.call("set_war_mode", false, -1)
 	_set_event_controls_disabled(true, true)
 	var target_role := _node_role_label(target_city)
-	hint_label.text = ("NUCLEAR LAUNCH → %s" if nuclear else "MISSILE LAUNCH → %s") % target_role
+	hint_label.text = ("NUCLEAR LAUNCH -> %s" if nuclear else "MISSILE LAUNCH -> %s") % target_role
 	_launch_war_missile_cinematic(launch_index, city_index, nuclear, false)
 
 func _faction_name(index: int) -> String:
@@ -669,7 +632,7 @@ func _launch_enemy_retaliation(defender_faction: int) -> void:
 	_commit_current_entry()
 	info_label.text = _format_info_line(current_entry)
 	var target_role := _node_role_label(cities[target_index])
-	hint_label.text = ("ENEMY NUCLEAR STRIKE → %s" if nuclear else "ENEMY STRIKE → %s") % target_role
+	hint_label.text = ("ENEMY NUCLEAR STRIKE -> %s" if nuclear else "ENEMY STRIKE -> %s") % target_role
 	_launch_war_missile_cinematic(source_index, target_index, nuclear, true)
 
 func _launch_war_missile_cinematic(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool) -> void:
