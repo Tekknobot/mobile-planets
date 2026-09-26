@@ -2,6 +2,9 @@ extends Control
 
 const WORLD_SHADER := preload("res://Shaders/world_generator.gdshader")
 const STAR_SHADER := preload("res://Shaders/star_generator.gdshader")
+const MAX_WAR_IMPACTS := 32
+const WAR_CONVENTIONAL_DAMAGE := 0.55
+const WAR_DESTROYED_DAMAGE := 0.999
 
 @onready var planet: ColorRect = $Planet
 @onready var planet_shadow: ColorRect = $PlanetShadow
@@ -119,7 +122,7 @@ func _ready() -> void:
 	catalog_list.item_selected.connect(_on_catalog_item_selected)
 	if war_overlay.has_signal("strike_completed"):
 		war_overlay.connect("strike_completed", Callable(self, "_on_war_strike_completed"))
-	hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
+	_set_default_hint()
 	catalog_panel.visible = false
 	tools_panel.visible = false
 	meteor.visible = false
@@ -269,7 +272,7 @@ func _input(event: InputEvent) -> void:
 		elif event.index == active_touch:
 			active_touch = -1
 			dragging = false
-			hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
+			_set_default_hint()
 		return
 
 	if event is InputEventScreenDrag and event.index == active_touch:
@@ -290,7 +293,7 @@ func _input(event: InputEvent) -> void:
 		else:
 			if dragging:
 				dragging = false
-				hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
+				_set_default_hint()
 		return
 
 	if event is InputEventMouseMotion and dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
@@ -310,8 +313,11 @@ func _try_begin_war_from_city(screen_position: Vector2) -> bool:
 	var cities: Array = current_entry.get("cities", [])
 	if city_index >= cities.size():
 		return false
+	if bool(current_entry.get("war_over", false)):
+		hint_label.text = _war_outcome_hint(current_entry)
+		return true
 	var source: Dictionary = cities[city_index]
-	if float(source.get("damage", 0.0)) >= 0.98:
+	if _city_is_destroyed(source):
 		return true
 	if int(source.get("faction", -1)) != 0:
 		hint_label.text = "CLICK ONE OF YOUR CYAN NODES"
@@ -320,7 +326,7 @@ func _try_begin_war_from_city(screen_position: Vector2) -> bool:
 	var enemy_alive := 0
 	for city_value in cities:
 		var city: Dictionary = city_value
-		if int(city.get("faction", -1)) > 0 and float(city.get("damage", 0.0)) < 0.98:
+		if int(city.get("faction", -1)) > 0 and not _city_is_destroyed(city):
 			enemy_alive += 1
 	if enemy_alive <= 0:
 		hint_label.text = "PLANET PACIFIED"
@@ -349,6 +355,9 @@ func _trigger_war() -> void:
 	if not _is_current_world() or blackhole_active or meteor_active:
 		return
 	_ensure_war_state(current_entry)
+	if bool(current_entry.get("war_over", false)):
+		hint_label.text = _war_outcome_hint(current_entry)
+		return
 	var cities: Array = current_entry.get("cities", [])
 	if cities.size() < 2:
 		hint_label.text = "NO VALID WAR NODES"
@@ -357,7 +366,7 @@ func _trigger_war() -> void:
 	var enemy_alive := 0
 	for city_value in cities:
 		var city: Dictionary = city_value
-		if float(city.get("damage", 0.0)) >= 0.98:
+		if _city_is_destroyed(city):
 			continue
 		if int(city.get("faction", -1)) == 0:
 			player_alive += 1
@@ -394,6 +403,10 @@ func _cancel_war_target(show_hint: bool) -> void:
 		hint_label.text = "WAR TARGETING CANCELED"
 
 func _attempt_war_target(screen_position: Vector2) -> void:
+	if bool(current_entry.get("war_over", false)):
+		_cancel_war_target(false)
+		hint_label.text = _war_outcome_hint(current_entry)
+		return
 	if not _is_point_on_planet(screen_position):
 		_cancel_war_target(true)
 		return
@@ -458,10 +471,15 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 		return
 	var city: Dictionary = cities[target_index]
 	var defending_faction := int(city.get("faction", -1))
-	var damage_add := 0.48 if nuclear else 0.22
-	city["damage"] = clamp(float(city.get("damage", 0.0)) + damage_add, 0.0, 1.0)
-	city["population"] = max(0.0, float(city.get("population", 0.6)) * (0.54 if nuclear else 0.82))
-	city["defense"] = max(0.0, float(city.get("defense", 0.5)) * (0.42 if nuclear else 0.74))
+	var impact_surface: Vector3 = city.get("surface", Vector3(0.0, 0.0, 1.0))
+	var was_destroyed := _city_is_destroyed(city)
+	var previous_damage = clamp(float(city.get("damage", 0.0)), 0.0, 1.0)
+	var new_damage = 1.0 if nuclear else clamp(previous_damage + WAR_CONVENTIONAL_DAMAGE, 0.0, 1.0)
+	var destroyed_now = nuclear or new_damage >= WAR_DESTROYED_DAMAGE
+	city["damage"] = 1.0 if destroyed_now else new_damage
+	city["destroyed"] = destroyed_now
+	city["population"] = 0.0 if destroyed_now else max(0.0, float(city.get("population", 0.6)) * 0.82)
+	city["defense"] = 0.0 if destroyed_now else max(0.0, float(city.get("defense", 0.5)) * 0.74)
 	cities[target_index] = city
 	current_entry["cities"] = cities
 	current_entry["stability"] = clamp(float(current_entry.get("stability", 1.0)) - (0.12 if nuclear else 0.04), 0.0, 1.0)
@@ -470,21 +488,48 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 	if nuclear:
 		current_entry["climate_shift"] = clamp(float(current_entry.get("climate_shift", 0.0)) - 0.055, -1.0, 1.0)
 		climate_visual = float(current_entry["climate_shift"])
-		current_entry["impact_enabled"] = true
-		current_entry["impact_center"] = city.get("surface", Vector3(0.0, 0.0, 1.0))
-		current_entry["impact_radius"] = 0.09
+
+	# Every combat strike now leaves a persistent scar. The shader keeps the most
+	# recent crater embedded in the terrain while WarOverlay renders the full
+	# impact history, including on gas/alien worlds.
+	_record_war_impact(impact_surface, nuclear, attacker_faction)
+	current_entry["impact_enabled"] = true
+	current_entry["impact_center"] = impact_surface
+	current_entry["impact_radius"] = 0.095 if nuclear else 0.060
+
 	_recalculate_world_state()
 	_apply_survival_constraints()
 	_recalculate_world_state()
 	_apply_world_state_to_material(current_entry)
 	_apply_impact_to_material(current_entry)
+
+	var target_destroyed_this_strike = destroyed_now and not was_destroyed
+	var player_remaining := _count_active_nodes(current_entry, 0, false)
+	var enemy_remaining := _count_active_nodes(current_entry, 0, true)
+	var war_ended := _update_war_outcome_state(current_entry)
 	_commit_current_entry()
 	if impact_position.x > -500.0 and impact_burst.has_method("burst"):
 		impact_burst.call("burst", impact_position)
 	info_label.text = _format_info_line(current_entry)
 
+	if war_ended:
+		ai_response_pending = false
+		ai_response_faction = -1
+		war_strike_active = false
+		war_target_mode = false
+		war_launch_index = -1
+		if war_overlay.has_method("set_war_mode"):
+			war_overlay.call("set_war_mode", false, -1)
+		_set_event_controls_disabled(false, false)
+		_update_buttons()
+		hint_label.text = _war_outcome_hint(current_entry)
+		return
+
 	if not ai_controlled and defending_faction > 0:
-		hint_label.text = "ENEMY RESPONSE COMPUTING"
+		if target_destroyed_this_strike:
+			hint_label.text = "HOSTILE NODE DESTROYED  %d ENEMY NODES REMAIN  RESPONSE INCOMING" % enemy_remaining
+		else:
+			hint_label.text = "HOSTILE NODE DAMAGED %d%%  RESPONSE INCOMING" % int(round(float(city.get("damage", 0.0)) * 100.0))
 		_schedule_enemy_retaliation(defending_faction)
 		return
 
@@ -493,9 +538,15 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 	_set_event_controls_disabled(false, false)
 	_update_buttons()
 	if ai_controlled:
-		hint_label.text = "ENEMY NUCLEAR IMPACT" if nuclear else "ENEMY IMPACT"
+		if target_destroyed_this_strike:
+			hint_label.text = "YOUR NODE DESTROYED  %d REMAIN" % player_remaining
+		else:
+			hint_label.text = "YOUR NODE DAMAGED %d%%" % int(round(float(city.get("damage", 0.0)) * 100.0))
 	else:
-		hint_label.text = "NUCLEAR IMPACT" if nuclear else "MISSILE IMPACT"
+		if target_destroyed_this_strike:
+			hint_label.text = "HOSTILE NODE DESTROYED  %d ENEMY NODES REMAIN" % enemy_remaining
+		else:
+			hint_label.text = "HOSTILE NODE DAMAGED %d%%" % int(round(float(city.get("damage", 0.0)) * 100.0))
 
 func _schedule_enemy_retaliation(defender_faction: int) -> void:
 	ai_response_pending = true
@@ -514,12 +565,22 @@ func _launch_enemy_retaliation(defender_faction: int) -> void:
 		_set_event_controls_disabled(false, false)
 		_update_buttons()
 		return
+	if _update_war_outcome_state(current_entry):
+		ai_response_pending = false
+		ai_response_faction = -1
+		war_strike_active = false
+		_set_event_controls_disabled(false, false)
+		_update_buttons()
+		_commit_current_entry()
+		info_label.text = _format_info_line(current_entry)
+		hint_label.text = _war_outcome_hint(current_entry)
+		return
 	var cities: Array = current_entry.get("cities", [])
 	var enemy_sources: Array[int] = []
 	var player_targets: Array[int] = []
 	for i in range(cities.size()):
 		var city: Dictionary = cities[i]
-		if float(city.get("damage", 0.0)) >= 0.98:
+		if _city_is_destroyed(city):
 			continue
 		var faction := int(city.get("faction", -1))
 		if faction == defender_faction:
@@ -531,7 +592,7 @@ func _launch_enemy_retaliation(defender_faction: int) -> void:
 	if enemy_sources.is_empty():
 		for i in range(cities.size()):
 			var city: Dictionary = cities[i]
-			if int(city.get("faction", -1)) > 0 and float(city.get("damage", 0.0)) < 0.98:
+			if int(city.get("faction", -1)) > 0 and not _city_is_destroyed(city):
 				enemy_sources.append(i)
 	if enemy_sources.is_empty() or player_targets.is_empty():
 		ai_response_pending = false
@@ -664,11 +725,11 @@ func _update_war_overlay() -> void:
 	if war_overlay == null or not war_overlay.has_method("set_context"):
 		return
 	if current_entry.is_empty() or current_entry.get("kind", "world") != "world":
-		war_overlay.call("set_context", planet, planet_rotation, float(current_entry.get("radius", 0.78)) if not current_entry.is_empty() else 0.78, [], [], false)
+		war_overlay.call("set_context", planet, planet_rotation, float(current_entry.get("radius", 0.78)) if not current_entry.is_empty() else 0.78, [], [], [], false)
 		return
 	_ensure_war_state(current_entry)
 	var civ := float(current_entry.get("civilization_level", 0.0))
-	war_overlay.call("set_context", planet, planet_rotation, float(current_entry.get("radius", 0.78)), current_entry.get("cities", []), current_entry.get("factions", []), civ >= 0.15 and not blackhole_active)
+	war_overlay.call("set_context", planet, planet_rotation, float(current_entry.get("radius", 0.78)), current_entry.get("cities", []), current_entry.get("factions", []), current_entry.get("war_impacts", []), civ >= 0.15 and not blackhole_active)
 
 func _ensure_war_state(entry: Dictionary) -> void:
 	if entry.get("kind", "world") != "world":
@@ -679,10 +740,26 @@ func _ensure_war_state(entry: Dictionary) -> void:
 		entry["war_history"] = 0
 	if not entry.has("player_faction"):
 		entry["player_faction"] = 0
+	if not entry.has("war_impacts"):
+		entry["war_impacts"] = []
+	if not entry.has("war_over"):
+		entry["war_over"] = false
+	if not entry.has("war_winner"):
+		entry["war_winner"] = -1
+	if not entry.has("war_result"):
+		entry["war_result"] = ""
 
 	var existing_cities: Array = entry.get("cities", [])
 	var existing_factions: Array = entry.get("factions", [])
 	if existing_factions.size() >= 2 and existing_cities.size() >= 4:
+		for i in range(existing_cities.size()):
+			var existing_city: Dictionary = existing_cities[i]
+			if not existing_city.has("destroyed"):
+				existing_city["destroyed"] = float(existing_city.get("damage", 0.0)) >= WAR_DESTROYED_DAMAGE
+			if bool(existing_city.get("destroyed", false)):
+				existing_city["damage"] = 1.0
+			existing_cities[i] = existing_city
+		entry["cities"] = existing_cities
 		for i in range(existing_factions.size()):
 			var faction: Dictionary = existing_factions[i]
 			faction["role"] = "player" if i == 0 else "enemy"
@@ -690,6 +767,7 @@ func _ensure_war_state(entry: Dictionary) -> void:
 		entry["factions"] = existing_factions
 		if int(entry.get("tension", 0)) <= 0:
 			entry["tension"] = 38
+		_update_war_outcome_state(entry)
 		return
 
 	var local_rng := RandomNumberGenerator.new()
@@ -724,12 +802,99 @@ func _ensure_war_state(entry: Dictionary) -> void:
 			"population":local_rng.randf_range(0.48, 1.0),
 			"military":local_rng.randf_range(0.38, 0.96),
 			"defense":local_rng.randf_range(0.24, 0.82),
-			"damage":0.0
+			"damage":0.0,
+			"destroyed":false
 		})
 	entry["factions"] = factions
 	entry["cities"] = cities
 	entry["player_faction"] = 0
 	entry["tension"] = local_rng.randi_range(34, 62)
+	entry["war_impacts"] = []
+	entry["war_over"] = false
+	entry["war_winner"] = -1
+	entry["war_result"] = ""
+
+func _city_is_destroyed(city: Dictionary) -> bool:
+	return bool(city.get("destroyed", false)) or float(city.get("damage", 0.0)) >= WAR_DESTROYED_DAMAGE
+
+func _count_active_nodes(entry: Dictionary, faction_index: int, enemies: bool = false) -> int:
+	var count := 0
+	var cities: Array = entry.get("cities", [])
+	for city_value in cities:
+		var city: Dictionary = city_value
+		if _city_is_destroyed(city):
+			continue
+		var city_faction := int(city.get("faction", -1))
+		if enemies:
+			if city_faction != faction_index:
+				count += 1
+		elif city_faction == faction_index:
+			count += 1
+	return count
+
+func _record_war_impact(surface: Vector3, nuclear: bool, attacker_faction: int) -> void:
+	var impacts: Array = current_entry.get("war_impacts", [])
+	impacts.append({
+		"surface": surface.normalized(),
+		"nuclear": nuclear,
+		"attacker_faction": attacker_faction,
+		"strike": int(current_entry.get("war_history", 0))
+	})
+	while impacts.size() > MAX_WAR_IMPACTS:
+		impacts.remove_at(0)
+	current_entry["war_impacts"] = impacts
+
+func _update_war_outcome_state(entry: Dictionary) -> bool:
+	if entry.get("kind", "world") != "world":
+		return false
+	var cities: Array = entry.get("cities", [])
+	if cities.is_empty():
+		return false
+	var player_alive := 0
+	var enemy_alive := 0
+	for city_value in cities:
+		var city: Dictionary = city_value
+		if _city_is_destroyed(city):
+			continue
+		if int(city.get("faction", -1)) == 0:
+			player_alive += 1
+		else:
+			enemy_alive += 1
+
+	if player_alive <= 0 and enemy_alive <= 0:
+		entry["war_over"] = true
+		entry["war_winner"] = -2
+		entry["war_result"] = "MUTUAL ANNIHILATION"
+	elif enemy_alive <= 0:
+		entry["war_over"] = true
+		entry["war_winner"] = 0
+		entry["war_result"] = "PLAYER VICTORY"
+	elif player_alive <= 0:
+		entry["war_over"] = true
+		entry["war_winner"] = 1
+		entry["war_result"] = "ENEMY VICTORY"
+	else:
+		entry["war_over"] = false
+		entry["war_winner"] = -1
+		entry["war_result"] = ""
+	return bool(entry.get("war_over", false))
+
+func _war_outcome_hint(entry: Dictionary) -> String:
+	var result := str(entry.get("war_result", "WAR ENDED"))
+	var strikes := int(entry.get("war_history", 0))
+	if result == "PLAYER VICTORY":
+		return "VICTORY  HOSTILE FACTIONS ELIMINATED  STRIKES %d" % strikes
+	if result == "ENEMY VICTORY":
+		return "DEFEAT  YOUR FACTION HAS FALLEN  STRIKES %d" % strikes
+	if result == "MUTUAL ANNIHILATION":
+		return "MUTUAL ANNIHILATION  STRIKES %d" % strikes
+	return result
+
+func _set_default_hint() -> void:
+	if not current_entry.is_empty() and bool(current_entry.get("war_over", false)):
+		hint_label.text = _war_outcome_hint(current_entry)
+	else:
+		hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
 
 func _apply_drag(relative: Vector2) -> void:
 	var delta_rotation := relative * 0.0105
@@ -1149,7 +1314,7 @@ func _toggle_catalog() -> void:
 		_update_catalog_list()
 		hint_label.text = "CATALOG OPEN"
 	else:
-		hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
+		_set_default_hint()
 
 func _toggle_tools_panel() -> void:
 	if meteor_target_mode or storm_target_mode or meteor_active or blackhole_active or current_entry.is_empty():
@@ -1160,7 +1325,7 @@ func _toggle_tools_panel() -> void:
 		_update_tools_buttons()
 		hint_label.text = "INTERVENTION TOOLS"
 	else:
-		hint_label.text = "CLICK YOUR NODE TO STRIKE  DRAG TO ROTATE"
+		_set_default_hint()
 
 func _adjust_water(amount: float) -> void:
 	if not _is_current_world():
@@ -1646,6 +1811,7 @@ func _apply_entry(entry: Dictionary) -> void:
 	_update_rotation_uniforms()
 	_update_buttons()
 	_update_war_overlay()
+	_set_default_hint()
 
 func _configure_moons(entry: Dictionary) -> void:
 	moon_specs = entry.get("moons", [])
@@ -1687,13 +1853,16 @@ func _format_info_line(entry: Dictionary) -> String:
 	var enemy_nodes := 0
 	for city_value in cities:
 		var city: Dictionary = city_value
-		if float(city.get("damage", 0.0)) >= 0.98:
+		if _city_is_destroyed(city):
 			continue
 		if int(city.get("faction", -1)) == 0:
 			player_nodes += 1
 		else:
 			enemy_nodes += 1
 	var tension := int(entry.get("tension", 0))
+	if bool(entry.get("war_over", false)):
+		var result := str(entry.get("war_result", "WAR ENDED"))
+		return "%s  YOU %d  ENEMY %d  STRIKES %d" % [result, player_nodes, enemy_nodes, int(entry.get("war_history", 0))]
 	return "YOU %d  ENEMY %d  TENSION %d" % [player_nodes, enemy_nodes, tension]
 
 func _base_temperature(entry: Dictionary) -> int:

@@ -11,20 +11,24 @@ var _rotation := Vector2.ZERO
 var _planet_radius := 0.78
 var _cities: Array = []
 var _factions: Array = []
+var _impacts: Array = []
 var _show_nodes := false
 var _war_mode := false
 var _selected_source := -1
 var _missiles: Array[Dictionary] = []
 
+const DESTROYED_DAMAGE := 0.999
+
 func _ready() -> void:
 	set_process(true)
 
-func set_context(planet_node: Control, rotation: Vector2, planet_radius: float, cities: Array, factions: Array, show_nodes: bool) -> void:
+func set_context(planet_node: Control, rotation: Vector2, planet_radius: float, cities: Array, factions: Array, impacts: Array, show_nodes: bool) -> void:
 	_planet = planet_node
 	_rotation = rotation
 	_planet_radius = planet_radius
 	_cities = cities
 	_factions = factions
+	_impacts = impacts
 	_show_nodes = show_nodes
 	queue_redraw()
 
@@ -40,7 +44,7 @@ func pick_city(screen_position: Vector2) -> int:
 	var best_distance := 26.0
 	for i in range(_cities.size()):
 		var city = _cities[i]
-		if float(city.get("damage", 0.0)) >= 0.98:
+		if _city_is_destroyed(city):
 			continue
 		var projected := _project_surface(city.get("surface", Vector3(0.0, 0.0, 1.0)), 1.015)
 		if not bool(projected.get("visible", false)):
@@ -50,6 +54,9 @@ func pick_city(screen_position: Vector2) -> int:
 			best_distance = distance
 			best = i
 	return best
+
+func _city_is_destroyed(city: Dictionary) -> bool:
+	return bool(city.get("destroyed", false)) or float(city.get("damage", 0.0)) >= DESTROYED_DAMAGE
 
 func launch_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool = false) -> void:
 	if source_index < 0 or target_index < 0 or source_index >= _cities.size() or target_index >= _cities.size():
@@ -93,15 +100,43 @@ func _process(delta: float) -> void:
 func _draw() -> void:
 	if _planet == null:
 		return
+	_draw_craters()
 	if _show_nodes:
 		_draw_cities()
 	_draw_missiles()
+
+func _draw_craters() -> void:
+	for impact_value in _impacts:
+		var impact: Dictionary = impact_value
+		var surface: Vector3 = impact.get("surface", Vector3(0.0, 0.0, 1.0))
+		var projected := _project_surface(surface, 1.006)
+		if not bool(projected.get("visible", false)):
+			continue
+		var depth = clamp(float(projected.get("depth", 0.0)), 0.0, 1.0)
+		if depth <= 0.02:
+			continue
+		var nuclear := bool(impact.get("nuclear", false))
+		var base_radius := 14.0 if nuclear else 8.5
+		var radius := base_radius * sqrt(max(depth, 0.04))
+		var pos: Vector2 = projected.get("position", Vector2.ZERO)
+		pos = (pos / 2.0).round() * 2.0
+
+		# A dark basin + broken hot rim reads as surface damage without hiding
+		# civilization nodes. Nuclear strikes leave a larger, hotter scar.
+		draw_circle(pos, radius, Color(0.025, 0.020, 0.018, 0.84), true, -1.0, false)
+		draw_circle(pos, max(2.0, radius * 0.43), Color(0.005, 0.004, 0.004, 0.92), true, -1.0, false)
+		var rim_color := Color(0.94, 0.30, 0.09, 0.68) if nuclear else Color(0.40, 0.26, 0.19, 0.54)
+		draw_arc(pos, radius * 0.84, 0.22, 2.60, 12, rim_color, 2.0, false)
+		draw_arc(pos, radius * 0.84, 3.30, 5.58, 12, rim_color, 2.0, false)
+		if nuclear:
+			_draw_pixel(pos + Vector2(radius * 0.58, -radius * 0.22), Color(1.0, 0.48, 0.12, 0.68), 3.0)
+			_draw_pixel(pos + Vector2(-radius * 0.44, radius * 0.34), Color(0.76, 0.18, 0.06, 0.62), 3.0)
 
 func _draw_cities() -> void:
 	for i in range(_cities.size()):
 		var city: Dictionary = _cities[i]
 		var damage = clamp(float(city.get("damage", 0.0)), 0.0, 1.0)
-		if damage >= 0.98:
+		if _city_is_destroyed(city):
 			continue
 		var projected := _project_surface(city.get("surface", Vector3(0.0, 0.0, 1.0)), 1.012)
 		if not bool(projected.get("visible", false)):
@@ -114,6 +149,10 @@ func _draw_cities() -> void:
 		_draw_pixel(pos, color, size)
 		if faction_index == 0:
 			draw_arc(pos, size + 3.0, 0.0, TAU, 16, Color(0.62, 0.94, 1.0, 0.72), 1.0, true)
+		if damage > 0.001:
+			var meter_radius := size + 5.0
+			draw_arc(pos, meter_radius, -PI * 0.5, -PI * 0.5 + TAU * (1.0 - damage), 18, Color(0.96, 0.72, 0.24, 0.92), 2.0, true)
+			draw_line(pos + Vector2(-4.0, -4.0), pos + Vector2(4.0, 4.0), Color(1.0, 0.38, 0.20, 0.88), 1.5, true)
 		if _war_mode:
 			draw_rect(Rect2(pos - Vector2.ONE * (size + 4.0) * 0.5, Vector2.ONE * (size + 4.0)), Color(color.r, color.g, color.b, 0.72), false, 1.0)
 		if i == _selected_source:
