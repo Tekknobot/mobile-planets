@@ -17,6 +17,8 @@ var _show_nodes := false
 var _war_mode := false
 var _selected_source := -1
 var _missiles: Array[Dictionary] = []
+var _hover_index := -1
+var _hover_font: Font = null
 
 const DESTROYED_DAMAGE := 0.999
 
@@ -31,11 +33,17 @@ func set_context(planet_node: Control, rotation: Vector2, planet_radius: float, 
 	_factions = factions
 	_impacts = impacts
 	_show_nodes = show_nodes
+	if not _show_nodes or _hover_index >= _cities.size():
+		_hover_index = -1
 	queue_redraw()
 
 func set_war_mode(active: bool, source_index: int = -1) -> void:
 	_war_mode = active
 	_selected_source = source_index
+	queue_redraw()
+
+func set_hover_font(font: Font) -> void:
+	_hover_font = font
 	queue_redraw()
 
 func pick_city(screen_position: Vector2) -> int:
@@ -58,6 +66,32 @@ func pick_city(screen_position: Vector2) -> int:
 
 func _city_is_destroyed(city: Dictionary) -> bool:
 	return bool(city.get("destroyed", false)) or float(city.get("damage", 0.0)) >= DESTROYED_DAMAGE
+
+func _node_role_label(city: Dictionary) -> String:
+	match str(city.get("node_class", "industry")):
+		"capital":
+			return "CAPITAL"
+		"missile_base":
+			return "MISSILE BASE"
+		"defense_array":
+			return "DEFENSE ARRAY"
+		"radar":
+			return "RADAR"
+		_:
+			return "INDUSTRY"
+
+func _hover_label(city: Dictionary) -> String:
+	var faction_index := int(city.get("faction", 0))
+	var allegiance := "PLAYER" if faction_index == 0 else "HOSTILE"
+	return "%s - %s" % [allegiance, _node_role_label(city)]
+
+func _update_hover() -> void:
+	var next_hover := -1
+	if _show_nodes and _planet != null:
+		next_hover = pick_city(get_viewport().get_mouse_position())
+	if next_hover != _hover_index:
+		_hover_index = next_hover
+		queue_redraw()
 
 func launch_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool = false, interception: Dictionary = {}) -> void:
 	if source_index < 0 or target_index < 0 or source_index >= _cities.size() or target_index >= _cities.size():
@@ -89,6 +123,7 @@ func has_active_missiles() -> bool:
 	return not _missiles.is_empty()
 
 func _process(delta: float) -> void:
+	_update_hover()
 	if not _missiles.is_empty():
 		for i in range(_missiles.size() - 1, -1, -1):
 			var missile: Dictionary = _missiles[i]
@@ -126,6 +161,7 @@ func _draw() -> void:
 	_draw_craters()
 	if _show_nodes:
 		_draw_cities()
+		_draw_hover_tooltip()
 	_draw_missiles()
 
 func _draw_craters() -> void:
@@ -205,6 +241,32 @@ func _draw_node_role(pos: Vector2, city: Dictionary, color: Color, size: float) 
 			draw_line(pos, pos + Vector2(0.0, -8.0), accent, 1.2, true)
 			draw_arc(pos + Vector2(0.0, -7.0), 5.0, -PI * 0.86, -PI * 0.14, 8, accent, 1.2, true)
 			draw_arc(pos + Vector2(0.0, -7.0), 8.0, -PI * 0.86, -PI * 0.14, 10, Color(accent.r, accent.g, accent.b, 0.58), 1.0, true)
+
+func _draw_hover_tooltip() -> void:
+	if _hover_index < 0 or _hover_index >= _cities.size():
+		return
+	var city: Dictionary = _cities[_hover_index]
+	if _city_is_destroyed(city):
+		return
+	var projected := _project_surface(city.get("surface", Vector3(0.0, 0.0, 1.0)), 1.018)
+	if not bool(projected.get("visible", false)):
+		return
+	var node_pos: Vector2 = projected.get("position", Vector2.ZERO)
+	var text := _hover_label(city)
+	var font: Font = _hover_font if _hover_font != null else ThemeDB.fallback_font
+	var font_size := 18
+	var text_size := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
+	var padding := Vector2(7.0, 5.0)
+	var box_size := text_size + padding * 2.0
+	var box_pos := node_pos + Vector2(14.0, -box_size.y - 10.0)
+	var viewport_size := get_viewport_rect().size
+	box_pos.x = clamp(box_pos.x, 4.0, max(4.0, viewport_size.x - box_size.x - 4.0))
+	box_pos.y = clamp(box_pos.y, 4.0, max(4.0, viewport_size.y - box_size.y - 4.0))
+	var box := Rect2(box_pos, box_size)
+	draw_rect(box, Color(0.025, 0.035, 0.045, 0.94), true)
+	var faction_color := _faction_color(int(city.get("faction", 0)))
+	draw_rect(box, Color(faction_color.r, faction_color.g, faction_color.b, 0.92), false, 1.5)
+	draw_string(font, box_pos + Vector2(padding.x, padding.y + text_size.y * 0.78), text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, Color(0.96, 0.98, 1.0, 1.0))
 
 func _draw_missiles() -> void:
 	for missile in _missiles:

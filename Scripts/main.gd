@@ -101,6 +101,8 @@ func _ready() -> void:
 	rng.randomize()
 	_setup_materials()
 	_apply_mago_font()
+	if war_overlay.has_method("set_hover_font"):
+		war_overlay.call("set_hover_font", $UI.get_theme_default_font())
 	planet_base_position = planet.position
 	shadow_base_position = planet_shadow.position
 	planet.pivot_offset = planet.size * 0.5
