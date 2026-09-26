@@ -5,6 +5,15 @@ const STAR_SHADER := preload("res://Shaders/star_generator.gdshader")
 const MAX_WAR_IMPACTS := 32
 const WAR_CONVENTIONAL_DAMAGE := 0.55
 const WAR_DESTROYED_DAMAGE := 0.999
+const WAR_INDUSTRY_DAMAGE_MULTIPLIER := 0.88
+const WAR_NODE_CLASSES := ["capital", "missile_base", "defense_array", "industry", "radar"]
+const WAR_NODE_LABELS := {
+	"capital": "CAPITAL",
+	"missile_base": "MISSILE BASE",
+	"defense_array": "DEFENSE ARRAY",
+	"industry": "INDUSTRY",
+	"radar": "RADAR"
+}
 
 @onready var planet: ColorRect = $Planet
 @onready var planet_shadow: ColorRect = $PlanetShadow
@@ -122,6 +131,8 @@ func _ready() -> void:
 	catalog_list.item_selected.connect(_on_catalog_item_selected)
 	if war_overlay.has_signal("strike_completed"):
 		war_overlay.connect("strike_completed", Callable(self, "_on_war_strike_completed"))
+	if war_overlay.has_signal("strike_intercepted"):
+		war_overlay.connect("strike_intercepted", Callable(self, "_on_war_strike_intercepted"))
 	_set_default_hint()
 	catalog_panel.visible = false
 	tools_panel.visible = false
@@ -323,6 +334,12 @@ func _try_begin_war_from_city(screen_position: Vector2) -> bool:
 		hint_label.text = "CLICK ONE OF YOUR CYAN NODES"
 		return true
 
+	if _update_war_outcome_state(current_entry):
+		_commit_current_entry()
+		info_label.text = _format_info_line(current_entry)
+		hint_label.text = _war_outcome_hint(current_entry)
+		return true
+
 	var enemy_alive := 0
 	for city_value in cities:
 		var city: Dictionary = city_value
@@ -332,15 +349,25 @@ func _try_begin_war_from_city(screen_position: Vector2) -> bool:
 		hint_label.text = "PLANET PACIFIED"
 		return true
 
+	var launch_index := _find_launch_source_index(cities, 0, city_index)
+	if launch_index < 0:
+		if _update_war_outcome_state(current_entry):
+			_commit_current_entry()
+			info_label.text = _format_info_line(current_entry)
+			hint_label.text = _war_outcome_hint(current_entry)
+		else:
+			hint_label.text = "NO MISSILE BASE OR CAPITAL AVAILABLE"
+		return true
 	war_target_mode = true
-	war_launch_index = city_index
+	war_launch_index = launch_index
 	dragging = false
 	active_touch = -1
 	rotation_velocity = Vector2.ZERO
 	_set_event_controls_disabled(true, true)
 	if war_overlay.has_method("set_war_mode"):
 		war_overlay.call("set_war_mode", true, war_launch_index)
-	hint_label.text = "SELECT ENEMY TARGET  TENSION %d" % int(current_entry.get("tension", 0))
+	var launch_role := _node_role_label(cities[war_launch_index])
+	hint_label.text = "%s READY  SELECT ENEMY TARGET  TENSION %d" % [launch_role, int(current_entry.get("tension", 0))]
 	return true
 
 func _is_point_on_planet(screen_position: Vector2) -> bool:
@@ -355,6 +382,11 @@ func _trigger_war() -> void:
 	if not _is_current_world() or blackhole_active or meteor_active:
 		return
 	_ensure_war_state(current_entry)
+	if _update_war_outcome_state(current_entry):
+		_commit_current_entry()
+		info_label.text = _format_info_line(current_entry)
+		hint_label.text = _war_outcome_hint(current_entry)
+		return
 	if bool(current_entry.get("war_over", false)):
 		hint_label.text = _war_outcome_hint(current_entry)
 		return
@@ -424,11 +456,20 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 		if int(candidate_source.get("faction", -1)) != 0:
 			hint_label.text = "SELECT YOUR FACTION NODE"
 			return
-		war_launch_index = city_index
+		war_launch_index = _find_launch_source_index(cities, 0, city_index)
+		if war_launch_index < 0:
+			if _update_war_outcome_state(current_entry):
+				_commit_current_entry()
+				info_label.text = _format_info_line(current_entry)
+				hint_label.text = _war_outcome_hint(current_entry)
+			else:
+				hint_label.text = "NO MISSILE BASE OR CAPITAL AVAILABLE"
+			return
 		if war_overlay.has_method("set_war_mode"):
 			war_overlay.call("set_war_mode", true, war_launch_index)
 		var faction_name := _faction_name(0)
-		hint_label.text = "SELECT ENEMY TARGET  %s" % faction_name
+		var launch_role := _node_role_label(cities[war_launch_index])
+		hint_label.text = "%s READY  SELECT ENEMY TARGET  %s" % [launch_role, faction_name]
 		return
 
 	if city_index == war_launch_index:
@@ -436,12 +477,16 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 		return
 	var source_city: Dictionary = cities[war_launch_index]
 	var target_city: Dictionary = cities[city_index]
-	if int(target_city.get("faction", 0)) == 0:
+	var target_faction := int(target_city.get("faction", 0))
+	if target_faction == 0:
 		hint_label.text = "SELECT AN ENEMY FACTION"
+		return
+	if not _faction_is_combat_operational(cities, target_faction):
+		hint_label.text = "THAT FACTION CAN NO LONGER WAGE WAR"
 		return
 
 	var tension := int(current_entry.get("tension", 0))
-	var nuclear := tension >= 80
+	var nuclear := tension >= 80 and _node_role(source_city) == "missile_base"
 	var launch_index := war_launch_index
 	current_entry["tension"] = clamp(tension + (12 if nuclear else 8), 0, 100)
 	current_entry["war_history"] = int(current_entry.get("war_history", 0)) + 1
@@ -453,7 +498,8 @@ func _attempt_war_target(screen_position: Vector2) -> void:
 	if war_overlay.has_method("set_war_mode"):
 		war_overlay.call("set_war_mode", false, -1)
 	_set_event_controls_disabled(true, true)
-	hint_label.text = "NUCLEAR LAUNCH DETECTED" if nuclear else "MISSILE LAUNCH DETECTED"
+	var target_role := _node_role_label(target_city)
+	hint_label.text = ("NUCLEAR LAUNCH → %s" if nuclear else "MISSILE LAUNCH → %s") % target_role
 	_launch_war_missile_cinematic(launch_index, city_index, nuclear, false)
 
 func _faction_name(index: int) -> String:
@@ -474,7 +520,8 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 	var impact_surface: Vector3 = city.get("surface", Vector3(0.0, 0.0, 1.0))
 	var was_destroyed := _city_is_destroyed(city)
 	var previous_damage = clamp(float(city.get("damage", 0.0)), 0.0, 1.0)
-	var new_damage = 1.0 if nuclear else clamp(previous_damage + WAR_CONVENTIONAL_DAMAGE, 0.0, 1.0)
+	var conventional_damage := WAR_CONVENTIONAL_DAMAGE * _conventional_damage_multiplier(defending_faction, target_index)
+	var new_damage = 1.0 if nuclear else clamp(previous_damage + conventional_damage, 0.0, 1.0)
 	var destroyed_now = nuclear or new_damage >= WAR_DESTROYED_DAMAGE
 	city["damage"] = 1.0 if destroyed_now else new_damage
 	city["destroyed"] = destroyed_now
@@ -504,6 +551,7 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 	_apply_impact_to_material(current_entry)
 
 	var target_destroyed_this_strike = destroyed_now and not was_destroyed
+	var target_role_label := _node_role_label(city)
 	var player_remaining := _count_active_nodes(current_entry, 0, false)
 	var enemy_remaining := _count_active_nodes(current_entry, 0, true)
 	var war_ended := _update_war_outcome_state(current_entry)
@@ -527,9 +575,9 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 
 	if not ai_controlled and defending_faction > 0:
 		if target_destroyed_this_strike:
-			hint_label.text = "HOSTILE NODE DESTROYED  %d ENEMY NODES REMAIN  RESPONSE INCOMING" % enemy_remaining
+			hint_label.text = "HOSTILE %s DESTROYED  %d ENEMY NODES REMAIN  RESPONSE INCOMING" % [target_role_label, enemy_remaining]
 		else:
-			hint_label.text = "HOSTILE NODE DAMAGED %d%%  RESPONSE INCOMING" % int(round(float(city.get("damage", 0.0)) * 100.0))
+			hint_label.text = "HOSTILE %s DAMAGED %d PERCENT  RESPONSE INCOMING" % [target_role_label, int(round(float(city.get("damage", 0.0)) * 100.0))]
 		_schedule_enemy_retaliation(defending_faction)
 		return
 
@@ -537,16 +585,17 @@ func _on_war_strike_completed(target_index: int, nuclear: bool, impact_position:
 	war_strike_active = false
 	_set_event_controls_disabled(false, false)
 	_update_buttons()
+
 	if ai_controlled:
 		if target_destroyed_this_strike:
-			hint_label.text = "YOUR NODE DESTROYED  %d REMAIN" % player_remaining
+			hint_label.text = "YOUR %s DESTROYED  %d REMAIN" % [target_role_label, player_remaining]
 		else:
-			hint_label.text = "YOUR NODE DAMAGED %d%%" % int(round(float(city.get("damage", 0.0)) * 100.0))
+			hint_label.text = "YOUR %s DAMAGED %d PERCENT" % [target_role_label, int(round(float(city.get("damage", 0.0)) * 100.0))]
 	else:
 		if target_destroyed_this_strike:
-			hint_label.text = "HOSTILE NODE DESTROYED  %d ENEMY NODES REMAIN" % enemy_remaining
+			hint_label.text = "HOSTILE %s DESTROYED  %d ENEMY NODES REMAIN" % [target_role_label, enemy_remaining]
 		else:
-			hint_label.text = "HOSTILE NODE DAMAGED %d%%" % int(round(float(city.get("damage", 0.0)) * 100.0))
+			hint_label.text = "HOSTILE %s DAMAGED %d PERCENT" % [target_role_label, int(round(float(city.get("damage", 0.0)) * 100.0))]
 
 func _schedule_enemy_retaliation(defender_faction: int) -> void:
 	ai_response_pending = true
@@ -576,57 +625,49 @@ func _launch_enemy_retaliation(defender_faction: int) -> void:
 		hint_label.text = _war_outcome_hint(current_entry)
 		return
 	var cities: Array = current_entry.get("cities", [])
-	var enemy_sources: Array[int] = []
 	var player_targets: Array[int] = []
 	for i in range(cities.size()):
 		var city: Dictionary = cities[i]
 		if _city_is_destroyed(city):
 			continue
-		var faction := int(city.get("faction", -1))
-		if faction == defender_faction:
-			enemy_sources.append(i)
-		elif faction == 0:
+		if int(city.get("faction", -1)) == 0:
 			player_targets.append(i)
 
-	# If the struck faction was completely destroyed, another hostile faction answers.
-	if enemy_sources.is_empty():
-		for i in range(cities.size()):
-			var city: Dictionary = cities[i]
-			if int(city.get("faction", -1)) > 0 and not _city_is_destroyed(city):
-				enemy_sources.append(i)
-	if enemy_sources.is_empty() or player_targets.is_empty():
+	var source_index := _find_launch_source_index(cities, defender_faction)
+	# If the struck faction has lost all launch infrastructure, another hostile
+	# faction with a surviving missile base/capital may answer instead.
+	if source_index < 0:
+		var factions: Array = current_entry.get("factions", [])
+		for faction_index in range(1, factions.size()):
+			source_index = _find_launch_source_index(cities, faction_index)
+			if source_index >= 0:
+				break
+	if source_index < 0 or player_targets.is_empty():
 		ai_response_pending = false
 		war_strike_active = false
 		_set_event_controls_disabled(false, false)
 		_update_buttons()
-		hint_label.text = "NO RETALIATION CAPABLE"
+		hint_label.text = "ENEMY LAUNCH INFRASTRUCTURE DISABLED"
 		return
-
-	var source_index := enemy_sources[0]
-	var source_score := -999.0
-	for index in enemy_sources:
-		var source_city: Dictionary = cities[index]
-		var score := float(source_city.get("military", 0.5)) * 1.35 + float(source_city.get("defense", 0.5)) * 0.35 - float(source_city.get("damage", 0.0)) * 1.15
-		if score > source_score:
-			source_score = score
-			source_index = index
 
 	var target_index := player_targets[0]
 	var target_score := -999.0
 	for index in player_targets:
 		var target_city: Dictionary = cities[index]
-		var score := float(target_city.get("population", 0.5)) * 1.15 + float(target_city.get("military", 0.5)) * 0.45 - float(target_city.get("damage", 0.0)) * 0.25
+		var score := _strategic_target_score(target_city, 0)
 		if score > target_score:
 			target_score = score
 			target_index = index
 
 	var tension := int(current_entry.get("tension", 0))
-	var nuclear := tension >= 88 or (tension >= 72 and rng.randf() < 0.48)
+	var source_city: Dictionary = cities[source_index]
+	var nuclear := _node_role(source_city) == "missile_base" and (tension >= 88 or (tension >= 72 and rng.randf() < 0.48))
 	current_entry["tension"] = clamp(tension + (12 if nuclear else 7), 0, 100)
 	current_entry["war_history"] = int(current_entry.get("war_history", 0)) + 1
 	_commit_current_entry()
 	info_label.text = _format_info_line(current_entry)
-	hint_label.text = "ENEMY NUCLEAR RETALIATION" if nuclear else "ENEMY RETALIATION"
+	var target_role := _node_role_label(cities[target_index])
+	hint_label.text = ("ENEMY NUCLEAR STRIKE → %s" if nuclear else "ENEMY STRIKE → %s") % target_role
 	_launch_war_missile_cinematic(source_index, target_index, nuclear, true)
 
 func _launch_war_missile_cinematic(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool) -> void:
@@ -638,21 +679,23 @@ func _launch_war_missile_cinematic(source_index: int, target_index: int, nuclear
 	rotation_velocity = Vector2.ZERO
 	var source_city: Dictionary = cities[source_index]
 	var source_surface: Vector3 = source_city.get("surface", Vector3(0.0, 0.0, 1.0))
+	var attacker_faction := int(source_city.get("faction", 0))
+	var interception := _roll_defense_interception(target_index, nuclear, attacker_faction)
 
 	# Enemy launches should never happen invisibly on the far side. Bring the
 	# hostile launch node into view before its missile actually leaves the surface.
 	if ai_controlled and not _is_surface_clearly_visible(source_surface, 0.38):
 		hint_label.text = "TRACKING ENEMY LAUNCH SITE"
-		_rotate_planet_to_surface_then(source_surface, 0.68, _begin_war_missile.bind(source_index, target_index, nuclear, ai_controlled))
+		_rotate_planet_to_surface_then(source_surface, 0.68, _begin_war_missile.bind(source_index, target_index, nuclear, ai_controlled, interception))
 	else:
-		_begin_war_missile(source_index, target_index, nuclear, ai_controlled)
+		_begin_war_missile(source_index, target_index, nuclear, ai_controlled, interception)
 
-func _begin_war_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool) -> void:
+func _begin_war_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool, interception: Dictionary = {}) -> void:
 	if not _is_current_world() or blackhole_active:
 		war_strike_active = false
 		return
 	if war_overlay.has_method("launch_missile"):
-		war_overlay.call("launch_missile", source_index, target_index, nuclear, ai_controlled)
+		war_overlay.call("launch_missile", source_index, target_index, nuclear, ai_controlled, interception)
 
 	var flight_time := 2.45 if nuclear else 1.85
 	if impact_camera_tween != null and impact_camera_tween.is_valid():
@@ -752,12 +795,18 @@ func _ensure_war_state(entry: Dictionary) -> void:
 	var existing_cities: Array = entry.get("cities", [])
 	var existing_factions: Array = entry.get("factions", [])
 	if existing_factions.size() >= 2 and existing_cities.size() >= 4:
+		var role_counts: Dictionary = {}
 		for i in range(existing_cities.size()):
 			var existing_city: Dictionary = existing_cities[i]
 			if not existing_city.has("destroyed"):
 				existing_city["destroyed"] = float(existing_city.get("damage", 0.0)) >= WAR_DESTROYED_DAMAGE
 			if bool(existing_city.get("destroyed", false)):
 				existing_city["damage"] = 1.0
+			if not existing_city.has("node_class"):
+				var faction_index := int(existing_city.get("faction", 0))
+				var role_index := int(role_counts.get(faction_index, 0))
+				existing_city["node_class"] = WAR_NODE_CLASSES[role_index % WAR_NODE_CLASSES.size()]
+				role_counts[faction_index] = role_index + 1
 			existing_cities[i] = existing_city
 		entry["cities"] = existing_cities
 		for i in range(existing_factions.size()):
@@ -788,20 +837,50 @@ func _ensure_war_state(entry: Dictionary) -> void:
 		})
 
 	var city_roots := ["NOVA", "HAVEN", "CROWN", "DELTA", "ZENITH", "ORBIT", "ARC", "EMBER", "VECTOR", "AURORA", "CITADEL", "MERIDIAN", "SPIRE", "NEXUS"]
-	var city_count := local_rng.randi_range(7, 10)
+	# Every newly generated faction receives one of each strategic node class.
+	# This keeps the war readable while guaranteeing that interception and target
+	# priority mechanics are always present.
+	var city_count := faction_count * WAR_NODE_CLASSES.size()
 	var cities: Array[Dictionary] = []
 	for i in range(city_count):
 		var latitude := deg_to_rad(local_rng.randf_range(-58.0, 58.0))
 		var longitude := local_rng.randf_range(-PI, PI)
 		var surface := Vector3(cos(latitude) * sin(longitude), sin(latitude), cos(latitude) * cos(longitude)).normalized()
 		var faction_index := i % faction_count
+		var role_index := floori(float(i) / float(faction_count)) % WAR_NODE_CLASSES.size()
+		var node_class: String = WAR_NODE_CLASSES[role_index]
+		var population := local_rng.randf_range(0.48, 1.0)
+		var military := local_rng.randf_range(0.38, 0.96)
+		var defense := local_rng.randf_range(0.24, 0.82)
+		match node_class:
+			"capital":
+				population = local_rng.randf_range(0.80, 1.0)
+				military = local_rng.randf_range(0.58, 0.82)
+				defense = local_rng.randf_range(0.58, 0.80)
+			"missile_base":
+				population = local_rng.randf_range(0.34, 0.56)
+				military = local_rng.randf_range(0.86, 1.0)
+				defense = local_rng.randf_range(0.46, 0.68)
+			"defense_array":
+				population = local_rng.randf_range(0.24, 0.42)
+				military = local_rng.randf_range(0.62, 0.82)
+				defense = local_rng.randf_range(0.84, 1.0)
+			"industry":
+				population = local_rng.randf_range(0.66, 0.90)
+				military = local_rng.randf_range(0.34, 0.56)
+				defense = local_rng.randf_range(0.46, 0.68)
+			"radar":
+				population = local_rng.randf_range(0.30, 0.50)
+				military = local_rng.randf_range(0.44, 0.64)
+				defense = local_rng.randf_range(0.56, 0.76)
 		cities.append({
 			"name":"%s %02d" % [city_roots[(i + local_rng.randi_range(0, city_roots.size() - 1)) % city_roots.size()], i + 1],
 			"faction":faction_index,
+			"node_class":node_class,
 			"surface":surface,
-			"population":local_rng.randf_range(0.48, 1.0),
-			"military":local_rng.randf_range(0.38, 0.96),
-			"defense":local_rng.randf_range(0.24, 0.82),
+			"population":population,
+			"military":military,
+			"defense":defense,
 			"damage":0.0,
 			"destroyed":false
 		})
@@ -832,6 +911,192 @@ func _count_active_nodes(entry: Dictionary, faction_index: int, enemies: bool = 
 			count += 1
 	return count
 
+func _node_role(city: Dictionary) -> String:
+	return str(city.get("node_class", "industry"))
+
+func _node_role_label(city: Dictionary) -> String:
+	var role := _node_role(city)
+	return str(WAR_NODE_LABELS.get(role, "NODE"))
+
+func _has_active_role(cities: Array, faction_index: int, role: String, exclude_index: int = -1) -> bool:
+	for i in range(cities.size()):
+		if i == exclude_index:
+			continue
+		var city: Dictionary = cities[i]
+		if _city_is_destroyed(city):
+			continue
+		if int(city.get("faction", -1)) == faction_index and _node_role(city) == role:
+			return true
+	return false
+
+func _faction_has_active_nodes(cities: Array, faction_index: int) -> bool:
+	for city_value in cities:
+		var city: Dictionary = city_value
+		if _city_is_destroyed(city):
+			continue
+		if int(city.get("faction", -1)) == faction_index:
+			return true
+	return false
+
+func _faction_has_launch_capability(cities: Array, faction_index: int) -> bool:
+	return _has_active_role(cities, faction_index, "missile_base") or _has_active_role(cities, faction_index, "capital")
+
+func _faction_is_combat_operational(cities: Array, faction_index: int) -> bool:
+	return _faction_has_active_nodes(cities, faction_index) and _faction_has_launch_capability(cities, faction_index)
+
+func _refresh_faction_status(entry: Dictionary) -> void:
+	var cities: Array = entry.get("cities", [])
+	var factions: Array = entry.get("factions", [])
+	for i in range(factions.size()):
+		var faction: Dictionary = factions[i]
+		var has_nodes := _faction_has_active_nodes(cities, i)
+		var launch_capable := _faction_has_launch_capability(cities, i)
+		var operational := has_nodes and launch_capable
+		faction["launch_capable"] = launch_capable
+		faction["war_active"] = operational
+		if operational:
+			faction["status"] = "active"
+		elif has_nodes:
+			faction["status"] = "collapsed"
+		else:
+			faction["status"] = "destroyed"
+		factions[i] = faction
+	entry["factions"] = factions
+
+func _find_launch_source_index(cities: Array, faction_index: int, preferred_index: int = -1) -> int:
+	if preferred_index >= 0 and preferred_index < cities.size():
+		var preferred: Dictionary = cities[preferred_index]
+		if not _city_is_destroyed(preferred) and int(preferred.get("faction", -1)) == faction_index and _node_role(preferred) == "missile_base":
+			return preferred_index
+	var best_missile := -1
+	var best_score := -999.0
+	for i in range(cities.size()):
+		var city: Dictionary = cities[i]
+		if _city_is_destroyed(city) or int(city.get("faction", -1)) != faction_index or _node_role(city) != "missile_base":
+			continue
+		var score := float(city.get("military", 0.5)) * 1.6 + float(city.get("defense", 0.5)) * 0.3 - float(city.get("damage", 0.0)) * 1.2
+		if score > best_score:
+			best_score = score
+			best_missile = i
+	if best_missile >= 0:
+		return best_missile
+	# Capitals retain a conventional emergency launch capability so losing the
+	# missile base hurts badly without creating a soft-lock.
+	for i in range(cities.size()):
+		var city: Dictionary = cities[i]
+		if not _city_is_destroyed(city) and int(city.get("faction", -1)) == faction_index and _node_role(city) == "capital":
+			return i
+	return -1
+
+func _conventional_damage_multiplier(defending_faction: int, target_index: int) -> float:
+	var cities: Array = current_entry.get("cities", [])
+	if target_index < 0 or target_index >= cities.size():
+		return 1.0
+	var target: Dictionary = cities[target_index]
+	# Industry hardens the rest of the network. Hit Industry itself first to
+	# remove this protection and return conventional attacks to two-hit kills.
+	if _node_role(target) != "industry" and _has_active_role(cities, defending_faction, "industry"):
+		return WAR_INDUSTRY_DAMAGE_MULTIPLIER
+	return 1.0
+
+func _strategic_target_score(city: Dictionary, defending_faction: int) -> float:
+	var cities: Array = current_entry.get("cities", [])
+	var role := _node_role(city)
+	var defense_online := _has_active_role(cities, defending_faction, "defense_array")
+	var score := 1.0
+	match role:
+		"defense_array":
+			score = 4.6 if defense_online else 1.2
+		"missile_base":
+			score = 3.9
+		"radar":
+			score = 3.3 if defense_online else 1.8
+		"capital":
+			score = 3.1
+		"industry":
+			score = 2.8
+	score += float(city.get("damage", 0.0)) * 3.0
+	score += float(city.get("military", 0.5)) * 0.45
+	score += float(city.get("population", 0.5)) * 0.25
+	return score
+
+func _roll_defense_interception(target_index: int, nuclear: bool, attacker_faction: int) -> Dictionary:
+	var cities: Array = current_entry.get("cities", [])
+	if target_index < 0 or target_index >= cities.size():
+		return {"intercepted": false}
+	var target: Dictionary = cities[target_index]
+	var defending_faction := int(target.get("faction", -1))
+	if defending_faction < 0 or defending_faction == attacker_faction:
+		return {"intercepted": false}
+	var radar_online := _has_active_role(cities, defending_faction, "radar")
+	var capital_online := _has_active_role(cities, defending_faction, "capital")
+	var target_surface: Vector3 = target.get("surface", Vector3(0.0, 0.0, 1.0))
+	var coverage_angle := deg_to_rad(118.0 if radar_online else 78.0)
+	var best_defense := -1
+	var best_chance := 0.0
+	for i in range(cities.size()):
+		if i == target_index:
+			continue # A defense array cannot intercept a direct strike on itself.
+		var defense_city: Dictionary = cities[i]
+		if _city_is_destroyed(defense_city) or int(defense_city.get("faction", -1)) != defending_faction or _node_role(defense_city) != "defense_array":
+			continue
+		var defense_surface: Vector3 = defense_city.get("surface", Vector3(0.0, 0.0, 1.0))
+		var angular_distance := acos(clamp(defense_surface.normalized().dot(target_surface.normalized()), -1.0, 1.0))
+		if angular_distance > coverage_angle:
+			continue
+		var coverage_quality = 1.0 - angular_distance / max(coverage_angle, 0.001)
+		var health = 1.0 - clamp(float(defense_city.get("damage", 0.0)), 0.0, 1.0)
+		var chance = 0.31 + float(defense_city.get("defense", 0.7)) * 0.13 + coverage_quality * 0.12
+		chance *= lerp(0.58, 1.0, health)
+		if radar_online:
+			chance += 0.18
+		if capital_online:
+			chance += 0.07
+		if nuclear:
+			chance *= 0.72
+		chance = clamp(chance, 0.10, 0.78 if not nuclear else 0.62)
+		if chance > best_chance:
+			best_chance = chance
+			best_defense = i
+	if best_defense < 0:
+		return {"intercepted": false, "chance": 0.0}
+	var intercepted := rng.randf() < best_chance
+	return {
+		"intercepted": intercepted,
+		"chance": best_chance,
+		"defense_index": best_defense,
+		"intercept_t": rng.randf_range(0.58, 0.76)
+	}
+
+func _on_war_strike_intercepted(target_index: int, impact_position: Vector2, attacker_faction: int, ai_controlled: bool, defense_index: int) -> void:
+	if not _is_current_world():
+		return
+	var cities: Array = current_entry.get("cities", [])
+	if target_index < 0 or target_index >= cities.size():
+		return
+	var target: Dictionary = cities[target_index]
+	var defending_faction := int(target.get("faction", -1))
+	if impact_position.x > -500.0 and impact_burst.has_method("burst"):
+		impact_burst.call("burst", impact_position)
+	_commit_current_entry()
+	info_label.text = _format_info_line(current_entry)
+	if not ai_controlled and defending_faction > 0:
+		var defense_name := "DEFENSE ARRAY"
+		if defense_index >= 0 and defense_index < cities.size():
+			defense_name = _node_role_label(cities[defense_index])
+		hint_label.text = "MISSILE INTERCEPTED BY %s  RESPONSE INCOMING" % defense_name
+		_schedule_enemy_retaliation(defending_faction)
+		return
+	ai_response_pending = false
+	ai_response_faction = -1
+	war_strike_active = false
+	_set_event_controls_disabled(false, false)
+	_update_buttons()
+	if ai_controlled:
+		hint_label.text = "YOUR DEFENSE INTERCEPTED ENEMY STRIKE"
+	else:
+		hint_label.text = "STRIKE INTERCEPTED"
+
 func _record_war_impact(surface: Vector3, nuclear: bool, attacker_faction: int) -> void:
 	var impacts: Array = current_entry.get("war_impacts", [])
 	impacts.append({
@@ -850,26 +1115,22 @@ func _update_war_outcome_state(entry: Dictionary) -> bool:
 	var cities: Array = entry.get("cities", [])
 	if cities.is_empty():
 		return false
-	var player_alive := 0
-	var enemy_alive := 0
-	for city_value in cities:
-		var city: Dictionary = city_value
-		if _city_is_destroyed(city):
-			continue
-		if int(city.get("faction", -1)) == 0:
-			player_alive += 1
-		else:
-			enemy_alive += 1
+	_refresh_faction_status(entry)
+	var player_operational := _faction_is_combat_operational(cities, 0)
+	var enemy_operational := 0
+	for faction_index in range(1, entry.get("factions", []).size()):
+		if _faction_is_combat_operational(cities, faction_index):
+			enemy_operational += 1
 
-	if player_alive <= 0 and enemy_alive <= 0:
+	if not player_operational and enemy_operational <= 0:
 		entry["war_over"] = true
 		entry["war_winner"] = -2
 		entry["war_result"] = "MUTUAL ANNIHILATION"
-	elif enemy_alive <= 0:
+	elif enemy_operational <= 0:
 		entry["war_over"] = true
 		entry["war_winner"] = 0
 		entry["war_result"] = "PLAYER VICTORY"
-	elif player_alive <= 0:
+	elif not player_operational:
 		entry["war_over"] = true
 		entry["war_winner"] = 1
 		entry["war_result"] = "ENEMY VICTORY"
@@ -883,11 +1144,11 @@ func _war_outcome_hint(entry: Dictionary) -> String:
 	var result := str(entry.get("war_result", "WAR ENDED"))
 	var strikes := int(entry.get("war_history", 0))
 	if result == "PLAYER VICTORY":
-		return "VICTORY  HOSTILE FACTIONS ELIMINATED  STRIKES %d" % strikes
+		return "VICTORY  HOSTILE WAR CAPACITY BROKEN  STRIKES %d" % strikes
 	if result == "ENEMY VICTORY":
-		return "DEFEAT  YOUR FACTION HAS FALLEN  STRIKES %d" % strikes
+		return "DEFEAT  YOUR WAR CAPACITY COLLAPSED  STRIKES %d" % strikes
 	if result == "MUTUAL ANNIHILATION":
-		return "MUTUAL ANNIHILATION  STRIKES %d" % strikes
+		return "MUTUAL WAR COLLAPSE  STRIKES %d" % strikes
 	return result
 
 func _set_default_hint() -> void:

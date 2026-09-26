@@ -1,6 +1,7 @@
 extends Node2D
 
 signal strike_completed(target_index: int, nuclear: bool, impact_position: Vector2, attacker_faction: int, ai_controlled: bool)
+signal strike_intercepted(target_index: int, impact_position: Vector2, attacker_faction: int, ai_controlled: bool, defense_index: int)
 
 @export var city_pixel_size: float = 6.0
 @export var missile_pixel_size: float = 5.0
@@ -58,11 +59,16 @@ func pick_city(screen_position: Vector2) -> int:
 func _city_is_destroyed(city: Dictionary) -> bool:
 	return bool(city.get("destroyed", false)) or float(city.get("damage", 0.0)) >= DESTROYED_DAMAGE
 
-func launch_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool = false) -> void:
+func launch_missile(source_index: int, target_index: int, nuclear: bool, ai_controlled: bool = false, interception: Dictionary = {}) -> void:
 	if source_index < 0 or target_index < 0 or source_index >= _cities.size() or target_index >= _cities.size():
 		return
 	var source: Dictionary = _cities[source_index]
 	var target: Dictionary = _cities[target_index]
+	var defense_index := int(interception.get("defense_index", -1))
+	var defense_surface := Vector3.ZERO
+	if defense_index >= 0 and defense_index < _cities.size():
+		var defense_city: Dictionary = _cities[defense_index]
+		defense_surface = defense_city.get("surface", Vector3.ZERO)
 	_missiles.append({
 		"source": source.get("surface", Vector3(0.0, 0.0, 1.0)),
 		"target": target.get("surface", Vector3(0.0, 0.0, 1.0)),
@@ -71,7 +77,11 @@ func launch_missile(source_index: int, target_index: int, nuclear: bool, ai_cont
 		"duration": 2.45 if nuclear else 1.85,
 		"nuclear": nuclear,
 		"faction": int(source.get("faction", 0)),
-		"ai_controlled": ai_controlled
+		"ai_controlled": ai_controlled,
+		"intercepted": bool(interception.get("intercepted", false)),
+		"intercept_t": float(interception.get("intercept_t", 0.67)),
+		"defense_index": defense_index,
+		"defense_surface": defense_surface
 	})
 	queue_redraw()
 
@@ -84,7 +94,20 @@ func _process(delta: float) -> void:
 			var missile: Dictionary = _missiles[i]
 			missile["elapsed"] = float(missile.get("elapsed", 0.0)) + delta
 			var duration = max(0.01, float(missile.get("duration", 1.8)))
-			if float(missile["elapsed"]) >= duration:
+			var progress = clamp(float(missile["elapsed"]) / duration, 0.0, 1.0)
+			var should_intercept = bool(missile.get("intercepted", false)) and progress >= float(missile.get("intercept_t", 0.67))
+			if should_intercept:
+				var target_index := int(missile.get("target_index", -1))
+				var attacker_faction := int(missile.get("faction", 0))
+				var ai_controlled := bool(missile.get("ai_controlled", false))
+				var defense_index := int(missile.get("defense_index", -1))
+				var intercept_t := float(missile.get("intercept_t", 0.67))
+				var intercept_point := _arc_point(missile.get("source", Vector3(0.0, 0.0, 1.0)), missile.get("target", Vector3(0.0, 0.0, 1.0)), intercept_t)
+				var projected := _project_surface(intercept_point.normalized(), intercept_point.length())
+				var impact_position: Vector2 = projected.get("position", Vector2(-1000.0, -1000.0))
+				_missiles.remove_at(i)
+				strike_intercepted.emit(target_index, impact_position, attacker_faction, ai_controlled, defense_index)
+			elif float(missile["elapsed"]) >= duration:
 				var target_index := int(missile.get("target_index", -1))
 				var nuclear := bool(missile.get("nuclear", false))
 				var attacker_faction := int(missile.get("faction", 0))
@@ -147,6 +170,7 @@ func _draw_cities() -> void:
 		color = color.lerp(Color(0.20, 0.20, 0.20, 1.0), damage * 0.72)
 		var size := city_pixel_size
 		_draw_pixel(pos, color, size)
+		_draw_node_role(pos, city, color, size)
 		if faction_index == 0:
 			draw_arc(pos, size + 3.0, 0.0, TAU, 16, Color(0.62, 0.94, 1.0, 0.72), 1.0, true)
 		if damage > 0.001:
@@ -157,6 +181,30 @@ func _draw_cities() -> void:
 			draw_rect(Rect2(pos - Vector2.ONE * (size + 4.0) * 0.5, Vector2.ONE * (size + 4.0)), Color(color.r, color.g, color.b, 0.72), false, 1.0)
 		if i == _selected_source:
 			draw_arc(pos, 11.0, 0.0, TAU, 20, Color(0.95, 0.95, 0.72, 0.95), 2.0, true)
+
+func _draw_node_role(pos: Vector2, city: Dictionary, color: Color, size: float) -> void:
+	var role := str(city.get("node_class", "industry"))
+	var accent := color.lerp(Color.WHITE, 0.34)
+	match role:
+		"capital":
+			draw_line(pos + Vector2(0.0, -8.0), pos + Vector2(7.0, 0.0), accent, 1.3, true)
+			draw_line(pos + Vector2(7.0, 0.0), pos + Vector2(0.0, 8.0), accent, 1.3, true)
+			draw_line(pos + Vector2(0.0, 8.0), pos + Vector2(-7.0, 0.0), accent, 1.3, true)
+			draw_line(pos + Vector2(-7.0, 0.0), pos + Vector2(0.0, -8.0), accent, 1.3, true)
+		"missile_base":
+			draw_line(pos + Vector2(0.0, 7.0), pos + Vector2(0.0, -8.0), accent, 1.6, true)
+			draw_line(pos + Vector2(0.0, -8.0), pos + Vector2(-3.0, -4.0), accent, 1.4, true)
+			draw_line(pos + Vector2(0.0, -8.0), pos + Vector2(3.0, -4.0), accent, 1.4, true)
+		"defense_array":
+			draw_arc(pos, size + 5.0, 0.0, TAU, 18, Color(accent.r, accent.g, accent.b, 0.78), 1.4, true)
+			draw_arc(pos, size + 8.0, -PI * 0.82, -PI * 0.18, 10, Color(accent.r, accent.g, accent.b, 0.52), 1.0, true)
+		"industry":
+			draw_rect(Rect2(pos + Vector2(-9.0, 2.0), Vector2(4.0, 5.0)), accent, false, 1.2)
+			draw_rect(Rect2(pos + Vector2(5.0, -1.0), Vector2(4.0, 8.0)), accent, false, 1.2)
+		"radar":
+			draw_line(pos, pos + Vector2(0.0, -8.0), accent, 1.2, true)
+			draw_arc(pos + Vector2(0.0, -7.0), 5.0, -PI * 0.86, -PI * 0.14, 8, accent, 1.2, true)
+			draw_arc(pos + Vector2(0.0, -7.0), 8.0, -PI * 0.86, -PI * 0.14, 10, Color(accent.r, accent.g, accent.b, 0.58), 1.0, true)
 
 func _draw_missiles() -> void:
 	for missile in _missiles:
@@ -196,6 +244,17 @@ func _draw_missiles() -> void:
 
 		var head_point := _arc_point(source, target, progress)
 		var head_projected := _project_surface(head_point.normalized(), head_point.length())
+		if bool(missile.get("intercepted", false)):
+			var intercept_t := float(missile.get("intercept_t", 0.67))
+			if progress >= max(0.0, intercept_t - 0.16):
+				var defense_surface: Vector3 = missile.get("defense_surface", Vector3.ZERO)
+				if defense_surface.length() > 0.1:
+					var defense_projected := _project_surface(defense_surface.normalized(), 1.035)
+					if bool(defense_projected.get("visible", false)) and bool(head_projected.get("visible", false)):
+						var defense_pos: Vector2 = defense_projected.get("position", Vector2.ZERO)
+						var head_pos_for_beam: Vector2 = head_projected.get("position", Vector2.ZERO)
+						draw_line(defense_pos, head_pos_for_beam, Color(0.74, 0.95, 1.0, 0.88), 1.5, true)
+						draw_circle(defense_pos, 5.0, Color(0.72, 0.94, 1.0, 0.34), false, 1.0, true)
 		if bool(head_projected.get("visible", false)):
 			var head_pos: Vector2 = head_projected.get("position", Vector2.ZERO)
 			_draw_pixel(head_pos, head_color, missile_pixel_size + (2.0 if nuclear else 0.0))
@@ -237,7 +296,11 @@ func _rotate_x(v: Vector3, angle: float) -> Vector3:
 
 func _faction_color(index: int) -> Color:
 	if index >= 0 and index < _factions.size():
-		return _factions[index].get("color", Color(0.75, 0.82, 0.88, 1.0))
+		var faction: Dictionary = _factions[index]
+		var color: Color = faction.get("color", Color(0.75, 0.82, 0.88, 1.0))
+		if str(faction.get("status", "active")) != "active":
+			return color.lerp(Color(0.30, 0.30, 0.30, 1.0), 0.68)
+		return color
 	return Color(0.75, 0.82, 0.88, 1.0)
 
 func _draw_pixel(position: Vector2, color: Color, size: float) -> void:
